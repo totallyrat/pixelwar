@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "pixel-war",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["server/main.ts"],
+      "port": 8080
+    }
+  ]
+}
