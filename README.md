@@ -98,6 +98,8 @@ and players reconnect automatically (sessions are remembered per browser tab).
   - **Mega Nuke:** needs a Level 2 Nuclear Facility. It erases a big chunk of a country, has a longer
     fallout, and does three times the nuclear-winter damage.
 
+    https://we.tl/t-BHZS1DfrmMDbJjU3
+
   Every launch triggers a **global alert** with an interception window (15 s Medium, 20 s Mega).
   Defenders can fire an interceptor from the alert, and anyone can press **VIEW** to ride along with
   the warhead in a letterboxed cinematic. Detonations shake every player's screen, wipe the core,
