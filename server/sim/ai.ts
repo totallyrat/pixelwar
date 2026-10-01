@@ -2,14 +2,15 @@
 // A think samples the border to learn its neighbourhood, then makes at most one economic decision,
 // sets mobilisation, and decides on expansion / war / naval / strategic strikes / diplomacy.
 
-import { AI, B, U, UNITS, BUILDINGS, TICK_RATE, TECH, TERRAIN, RES, buildCost } from '../../shared/balance.ts';
+import { AI, B, U, BUILDINGS, TICK_RATE, TECH, TERRAIN, RES, buildCost, unitCost, type Cost } from '../../shared/balance.ts';
 import { REL } from '../../shared/protocol.ts';
 import type { Game } from './game.ts';
 import type { Player } from './types.ts';
 import { launchAttack, effTroops } from './combat.ts';
 import { canPlace, placeBuilding, upgradeBuilding, slotsTotal } from './buildings.ts';
 import { canAfford } from './economy.ts';
-import { queueUnit, invade, launchMissile, launchNuke, launchBomber, moveWarships } from './units.ts';
+import { queueUnit, invade, launchMissile, launchNuke, launchBomber, moveWarships, maxLevel, unitHave } from './units.ts';
+import { aiLeadOp } from './ops.ts';
 import { rel, propose, breakTreaty, opinion } from './diplomacy.ts';
 import { buyTech } from './game.ts';
 
@@ -90,10 +91,16 @@ function economy(g: Game, p: Player, counts: Map<number, number>, neutral: numbe
   let built = 0, slotsLeft = free;
   for (const type of want) {
     if (built >= maxBuilds) break;
-    if (BUILDINGS[type].slot && slotsLeft <= 0) continue;
-    if (!canAfford(p, buildCost(type, 0))) continue;
     if (type === B.NUCLEAR_FACILITY && (p.btype[type].length || !p.btype[B.MISSILE_SILO].length || !s0.settings.nukes)) continue;
     if ((type === B.MISSILE_SILO || type === B.AIRBASE || type === B.RADAR || type === B.TANK_FACTORY) && p.btype[type].length >= 1 + Math.floor(p.tiles * m.as / 4000)) continue;
+    // each extra copy costs more, so upgrading an existing one is often the better deal
+    const fresh = buildCost(type, 0, p.btype[type].length);
+    const up = cheapestUpgrade(g, p, type);
+    if (up && (up.cost.money ?? 0) <= (fresh.money ?? 0) && canAfford(p, up.cost)) {
+      if (!upgradeBuilding(g, p, up.tile)) { built++; continue; }
+    }
+    if (BUILDINGS[type].slot && slotsLeft <= 0) continue;
+    if (!canAfford(p, fresh)) continue;
     const t = pickSite(g, p, type, counts);
     if (t < 0) continue;
     if (typeof placeBuilding(g, p, t, type, false) !== 'string') { built++; if (BUILDINGS[type].slot) slotsLeft--; }
@@ -101,12 +108,13 @@ function economy(g: Game, p: Player, counts: Map<number, number>, neutral: numbe
   // upgrades when rich
   if (!built && p.money > 2500 + p.tiles * 0.5) {
     const types = [B.CITY, B.FARM, B.FACTORY, B.BARRACKS, B.OIL_WELL];
-    const ty = types[g.randInt(types.length)];
-    const list = p.btype[ty];
-    if (list.length) {
-      const b = g.s.buildings[list[g.randInt(list.length)]]!;
-      if (!b.done && b.level > 0 && b.level < BUILDINGS[ty].maxLevel && canAfford(p, buildCost(ty, b.level))) upgradeBuilding(g, p, b.tile);
-    }
+    const up = cheapestUpgrade(g, p, types[g.randInt(types.length)]);
+    if (up && canAfford(p, up.cost)) upgradeBuilding(g, p, up.tile);
+  }
+  // a rich nuclear power upgrades its facility to unlock the mega nuke
+  if (p.money > 40000 && d > 0) {
+    const up = cheapestUpgrade(g, p, B.NUCLEAR_FACILITY);
+    if (up && canAfford(p, up.cost)) upgradeBuilding(g, p, up.tile);
   }
   // tech
   if (g.rand() < AI.techChance[d] * 0.3) {
@@ -119,7 +127,8 @@ function economy(g: Game, p: Player, counts: Map<number, number>, neutral: numbe
   // armour turns surplus money into strength without costing population
   if (p.btype[B.TANK_FACTORY].length && p.money > 1200 && p.queue[U.TANK] < 4) queueUnit(g, p, U.TANK, Math.min(10, 2 + Math.floor(p.money / 8000)));
   if (p.btype[B.MISSILE_SILO].length && p.money > 2500 && p.stock[U.MISSILE] + p.queue[U.MISSILE] < 2 + (p.money > 50000 ? 3 : 0)) queueUnit(g, p, U.MISSILE, 1);
-  if (p.btype[B.NUCLEAR_FACILITY].length && p.stock[U.NUKE] + p.queue[U.NUKE] < (d === 2 ? 2 : 1) && canAfford(p, UNITS[U.NUKE].cost)) queueUnit(g, p, U.NUKE, 1);
+  if (p.btype[B.NUCLEAR_FACILITY].length && p.stock[U.NUKE] + p.queue[U.NUKE] < (d === 2 ? 2 : 1) && canAfford(p, unitCost(U.NUKE, unitHave(p, U.NUKE)))) queueUnit(g, p, U.NUKE, 1);
+  if (d > 0 && maxLevel(g, p, B.NUCLEAR_FACILITY) >= 2 && unitHave(p, U.MEGA_NUKE) < 1 && canAfford(p, unitCost(U.MEGA_NUKE, 0))) queueUnit(g, p, U.MEGA_NUKE, 1);
   if (p.btype[B.AIRBASE].length && p.money > 1500) {
     if (p.stock[U.FIGHTER] + p.queue[U.FIGHTER] < 2 + d) queueUnit(g, p, U.FIGHTER, 1);
     else if (d === 2 && p.stock[U.BOMBER] + p.queue[U.BOMBER] < 2) queueUnit(g, p, U.BOMBER, 1);
@@ -128,6 +137,18 @@ function economy(g: Game, p: Player, counts: Map<number, number>, neutral: numbe
     if (p.stock[U.TRANSPORT] + p.queue[U.TRANSPORT] < 1 + (d === 2 ? 1 : 0)) queueUnit(g, p, U.TRANSPORT, 1);
     if (d > 0 && p.money > 3500 && p.ships + p.queue[U.WARSHIP] < d * 2) queueUnit(g, p, U.WARSHIP, 1);
   }
+}
+
+/** The cheapest idle building of a type that can still be upgraded. */
+function cheapestUpgrade(g: Game, p: Player, type: number): { tile: number; cost: Cost } | null {
+  let best: { tile: number; cost: Cost } | null = null;
+  for (const id of p.btype[type]) {
+    const b = g.s.buildings[id]!;
+    if (b.done || b.level <= 0 || b.level >= BUILDINGS[type].maxLevel) continue;
+    const c = buildCost(type, b.level);
+    if (!best || (c.money ?? 0) < (best.cost.money ?? 0)) best = { tile: b.tile, cost: c };
+  }
+  return best;
 }
 
 function pickSite(g: Game, p: Player, type: number, counts: Map<number, number>): number {
@@ -218,11 +239,16 @@ function military(g: Game, p: Player, counts: Map<number, number>, neutral: numb
     const t = pickTarget(g, foe, [B.FACTORY, B.FARM, B.BARRACKS, B.TANK_FACTORY]);
     if (t >= 0) launchBomber(g, p, t);
   }
-  if (p.stock[U.NUKE] > 0 && g.s.settings.nukes && g.rand() < AI.nukeChance[d] && (foe.score > p.score * 0.5 || p.recentLoss > p.tiles * 0.05)) {
+  const threat = foe.score > p.score * 0.5 || p.recentLoss > p.tiles * 0.05;
+  if (p.stock[U.MEGA_NUKE] > 0 && g.s.settings.nukes && g.rand() < AI.nukeChance[d] * 0.6 && foe.score > p.score * 0.7) {
+    launchNuke(g, p, foe.capital >= 0 ? foe.capital : pickTarget(g, foe, [B.CITY]), 1);
+  } else if (p.stock[U.NUKE] > 0 && g.s.settings.nukes && g.rand() < AI.nukeChance[d] && threat) {
     const t = pickTarget(g, foe, [B.CITY, B.MISSILE_SILO, B.NUCLEAR_FACILITY]);
-    launchNuke(g, p, t >= 0 ? t : foe.capital);
+    launchNuke(g, p, t >= 0 ? t : foe.capital, 0);
   }
   if (p.ships > 0 && g.rand() < 0.1 && foe.capital >= 0) moveWarships(g, p, foe.capital);
+  // lead an allied operation with a human ally now and then
+  if (g.rand() < 0.08) aiLeadOp(g, p, foe);
 }
 
 function pickTarget(g: Game, q: Player, prefs: number[]): number {

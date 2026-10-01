@@ -1,12 +1,16 @@
-// Touch-first input: one finger pans, two fingers pinch-zoom, tap selects, double-tap / long-press
-// attacks. Mouse: drag pans, wheel zooms, right-click (or right-drag release) attacks.
+// Touch-first input: one finger pans, two fingers pinch-zoom, tap selects, double-tap attacks and
+// holding a pixel opens the quick menu. Mouse: drag pans, wheel zooms, hold the left button for the
+// quick menu, right-click (or right-drag release) attacks.
 
 import type { Renderer } from './render/renderer.ts';
+
+const HOLD_MS = 430;
 
 export interface InputHandlers {
   tap(t: number): void;
   doubleTap(t: number): void;
   secondary(t: number): void;
+  hold(t: number, x: number, y: number): void;
   hover(t: number): void;
   escape(): void;
   key(k: string): void;
@@ -67,21 +71,22 @@ export class Input {
   }
 
   private down(e: PointerEvent) {
-    this.canvas.setPointerCapture(e.pointerId);
+    try { this.canvas.setPointerCapture(e.pointerId); } catch { /* synthetic or already-released pointer */ }
     const touch = e.pointerType !== 'mouse';
     this.ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, t0: performance.now(), button: e.button, touch });
     if (this.ptrs.size === 1) {
       this.moved = false;
       this.longFired = false;
       clearTimeout(this.longTimer);
-      if (touch) {
+      if (touch || e.button === 0) {
+        const x = e.clientX, y = e.clientY;
         this.longTimer = window.setTimeout(() => {
           if (!this.moved && this.ptrs.size === 1) {
             this.longFired = true;
-            navigator.vibrate?.(20);
-            this.h.secondary(this.r.tileAt(e.clientX, e.clientY));
+            navigator.vibrate?.(18);
+            this.h.hold(this.r.tileAt(x, y), x, y);
           }
-        }, 520);
+        }, HOLD_MS);
       }
     } else if (this.ptrs.size === 2) {
       clearTimeout(this.longTimer);
@@ -99,8 +104,9 @@ export class Input {
     }
     const dx = e.clientX - p.x, dy = e.clientY - p.y;
     p.x = e.clientX; p.y = e.clientY;
+    if (this.longFired) return; // the quick menu is open under this finger
     if (this.ptrs.size === 1) {
-      if (!this.moved && Math.hypot(p.x - p.x0, p.y - p.y0) > (p.touch ? 10 : 5)) { this.moved = true; clearTimeout(this.longTimer); }
+      if (!this.moved && Math.hypot(p.x - p.x0, p.y - p.y0) > (p.touch ? 10 : 6)) { this.moved = true; clearTimeout(this.longTimer); }
       if (this.moved && p.button !== 2) this.r.pan(dx, dy);
       if (!p.touch) this.h.hover(this.r.tileAt(e.clientX, e.clientY));
     } else if (this.ptrs.size === 2 && this.pinch) {

@@ -9,6 +9,33 @@ export interface AIState {
   lastNaval: number;
   lastDiplo: number;
   focus: number;         // preferred enemy id
+  lastOp?: number;       // tick the AI last led an allied operation
+}
+
+export type OpKind = 'attack' | 'invade' | 'missile' | 'bomb' | 'nuke' | 'mega' | 'fleet';
+export interface OpStep {
+  id: number;
+  by: number;            // executing nation
+  kind: OpKind;
+  tile: number;
+  pct: number;           // troop share for attack / invade
+  delay: number;         // seconds after H-hour
+  state: 'planned' | 'done' | 'failed';
+  note: string;
+}
+export interface OpMember { pid: number; status: 'invited' | 'joined' | 'declined' }
+export interface Operation {
+  id: number;
+  name: string;
+  owner: number;
+  target: number;        // nation the operation is aimed at (0 = none)
+  members: OpMember[];   // allies (owner excluded)
+  steps: OpStep[];
+  status: 'planning' | 'countdown' | 'running' | 'done' | 'cancelled';
+  launchAt: number;      // H-hour tick
+  created: number;
+  endedAt: number;
+  nextStep: number;
 }
 
 export interface Player {
@@ -111,6 +138,7 @@ export interface Flight {
   t1: number;
   ref: number;           // interceptor: nuke flight id; bomber return: airbase tile
   dead: boolean;
+  tier: number;          // warheads: index into NUKE_TIERS
 }
 
 export interface Proposal { from: number; to: number; kind: 'nap' | 'ally' | 'peace'; expires: number }
@@ -144,6 +172,7 @@ export interface State {
   opinion: Int8Array;
   proposals: Proposal[];
   napUntil: Map<number, number>;  // key min*MAXP+max -> tick the pact expires
+  operations: Operation[];
   nextId: number;
   winter: number;
   winterTimer: number;

@@ -10,8 +10,13 @@ export interface PInfo {
 }
 export interface Bld { id: number; type: number; tile: number; owner: number; level: number; done: number }
 export interface ShipC { id: number; type: number; owner: number; tile: number; prev: number; hp: number; at: number }
-export interface FlightC { id: number; kind: number; owner: number; from: number; to: number; t0: number; t1: number; ref: number }
-export interface NukeAlert { id: number; o: number; tile: number; target: number; t1: number }
+export interface FlightC { id: number; kind: number; owner: number; from: number; to: number; t0: number; t1: number; ref: number; tier: number }
+export interface NukeAlert { id: number; o: number; tile: number; target: number; t1: number; tier: number; from: number; t0: number }
+export interface OpStepC { id: number; by: number; kind: string; tile: number; pct: number; delay: number; state: string; note: string }
+export interface OpC {
+  id: number; name: string; owner: number; target: number; status: string; launchAt: number; created: number; endedAt: number;
+  members: { pid: number; status: string }[]; steps: OpStepC[];
+}
 export interface ChatLine { ch: string; from: number; name: string; text: string; tick: number }
 
 const MAXP = LIMITS.maxPlayers;
@@ -52,6 +57,7 @@ export class World {
   ships = new Map<number, ShipC>();
   flights = new Map<number, FlightC>();
   nukes = new Map<number, NukeAlert>();
+  ops = new Map<number, OpC>();
   me: any = null;
   myId = 0;
   rel = new Uint8Array(MAXP);
@@ -133,7 +139,9 @@ export class World {
     this.flights.clear();
     for (const f of meta.flights) this.addFlight(f);
     this.nukes.clear();
-    for (const n of meta.nukes) this.nukes.set(n.id, n);
+    for (const n of meta.nukes) this.nukes.set(n.id, { tier: 0, ...n });
+    this.ops.clear();
+    for (const o of meta.ops ?? []) this.ops.set(o.id, o);
     this.ships.clear();
     this.tick = meta.tick; this.tickAt = performance.now();
     this.phase = meta.phase; this.phaseEnd = meta.phaseEnd; this.peaceUntil = meta.peaceUntil; this.startTick = meta.startTick;
@@ -172,8 +180,8 @@ export class World {
   }
 
   private addFlight(f: number[]) {
-    const [id, kind, owner, from, to, t0, t1, ref] = f;
-    this.flights.set(id, { id, kind, owner, from, to, t0, t1, ref });
+    const [id, kind, owner, from, to, t0, t1, ref, tier] = f;
+    this.flights.set(id, { id, kind, owner, from, to, t0, t1, ref, tier: tier ?? 0 });
   }
 
   private applyTick(b: Uint8Array) {
@@ -243,7 +251,9 @@ export class World {
       }
       case 'fl': this.addFlight(e.f); break;
       case 'hit': this.flights.delete(e.id); if (e.k === 1) this.nukes.delete(e.id); break;
-      case 'nl': this.nukes.set(e.id, { id: e.id, o: e.o, tile: e.tile, target: e.target, t1: e.t1 }); break;
+      case 'nl': this.nukes.set(e.id, { id: e.id, o: e.o, tile: e.tile, target: e.target, t1: e.t1, tier: e.tier ?? 0, from: e.from ?? e.tile, t0: e.t0 ?? this.tick }); break;
+      case 'op': this.ops.set(e.op.id, e.op); break;
+      case 'opx': this.ops.delete(e.id); break;
       case 'nuke': {
         this.flights.delete(e.id);
         this.nukes.delete(e.id);

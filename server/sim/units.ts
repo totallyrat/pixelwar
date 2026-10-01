@@ -1,7 +1,7 @@
 // Unit production, ships (warships / transports), and flights (missiles, nukes, bombers, interceptors).
 
 import {
-  U, UNITS, UNIT_COUNT, BUILDINGS, B, LIMITS, NAVAL, MISSILE, NUKE, AIR, AIRDEF, RADAR, TICK_RATE, COMBAT,
+  U, UNITS, UNIT_COUNT, BUILDINGS, B, LIMITS, NAVAL, MISSILE, NUKE, NUKE_TIERS, AIR, AIRDEF, RADAR, TICK_RATE, COMBAT, unitCost,
 } from '../../shared/balance.ts';
 import { REL } from '../../shared/protocol.ts';
 import type { Game } from './game.ts';
@@ -15,31 +15,49 @@ import { rel, declareWar, adjustOpinion } from './diplomacy.ts';
 export const FLIGHT_KIND = { missile: 0, nuke: 1, bomber: 2, return: 3, interceptor: 4 } as const;
 
 // ---- production --------------------------------------------------------------------------------
+/** Highest level among a player's active buildings of a type. */
+export function maxLevel(g: Game, p: Player, type: number): number {
+  let m = 0;
+  for (const id of p.btype[type]) m = Math.max(m, g.s.buildings[id]!.level);
+  return m;
+}
+
+/** How many of a unit a player already has in stock + queue (drives warhead price scaling). */
+export const unitHave = (p: Player, u: number) => p.stock[u] + p.queue[u];
+
 export function queueUnit(g: Game, p: Player, u: number, n: number): string | null {
   if (!(u >= 0 && u < UNIT_COUNT)) return 'Unknown unit';
   const def = UNITS[u];
-  if (u === U.NUKE && !g.s.settings.nukes) return 'Nukes are disabled in this match';
+  if ((u === U.NUKE || u === U.MEGA_NUKE) && !g.s.settings.nukes) return 'Nukes are disabled in this match';
   if (!p.btype[def.building].length) return `Requires a ${BUILDINGS[def.building].name}`;
+  if (def.minLevel && maxLevel(g, p, def.building) < def.minLevel) return `Requires a Lv ${def.minLevel} ${BUILDINGS[def.building].name}`;
   n = Math.min(n, LIMITS.maxQueue - p.queue[u]);
   if (n <= 0) return 'Queue is full';
   let k = 0;
-  while (k < n && canAfford(p, def.cost)) { pay(p, def.cost); k++; }
+  while (k < n) {
+    const c = unitCost(u, unitHave(p, u));
+    if (!canAfford(p, c)) break;
+    pay(p, c);
+    p.queue[u]++;
+    k++;
+  }
   if (!k) return 'Not enough resources';
-  p.queue[u] += k;
   return null;
 }
 
 export function cancelQueue(g: Game, p: Player, u: number) {
   if (!(u >= 0 && u < UNIT_COUNT) || p.queue[u] <= 0) return;
   p.queue[u]--;
-  refund(p, UNITS[u].cost, 1);
+  refund(p, unitCost(u, unitHave(p, u)), 1);
   if (!p.queue[u]) p.qprog[u] = 0;
 }
 
 export function stepProduction(g: Game, p: Player, dt: number) {
   for (let u = 0; u < UNIT_COUNT; u++) {
     if (p.queue[u] <= 0) continue;
-    const rate = p.levels[UNITS[u].building];
+    const def = UNITS[u];
+    // a mega nuke only progresses while a Lv2 facility stands; other units use the summed levels
+    const rate = def.minLevel ? (maxLevel(g, p, def.building) >= def.minLevel ? p.levels[def.building] : 0) : p.levels[def.building];
     if (rate <= 0) continue;
     p.qprog[u] += dt * rate;
     const time = UNITS[u].time;
@@ -241,13 +259,13 @@ function bombard(g: Game, dt: number) {
 }
 
 // ---- flights --------------------------------------------------------------------------------------
-function addFlight(g: Game, kind: Flight['kind'], owner: number, from: number, to: number, ticks: number, ref = -1): Flight {
+function addFlight(g: Game, kind: Flight['kind'], owner: number, from: number, to: number, ticks: number, ref = -1, tier = 0): Flight {
   const s = g.s;
-  const f: Flight = { id: g.id(), kind, owner, from, to, t0: s.tick, t1: s.tick + Math.max(1, Math.round(ticks)), ref, dead: false };
+  const f: Flight = { id: g.id(), kind, owner, from, to, t0: s.tick, t1: s.tick + Math.max(1, Math.round(ticks)), ref, dead: false, tier };
   s.flights.push(f);
   return f;
 }
-const fpack = (f: Flight) => [f.id, FLIGHT_KIND[f.kind], f.owner, f.from, f.to, f.t0, f.t1, f.ref];
+const fpack = (f: Flight) => [f.id, FLIGHT_KIND[f.kind], f.owner, f.from, f.to, f.t0, f.t1, f.ref, f.tier ?? 0];
 export { fpack };
 
 function flightTicks(g: Game, dist: number, speed: number, extra: number) {
@@ -286,25 +304,29 @@ export function launchBomber(g: Game, p: Player, tile: number): string | null {
   return null;
 }
 
-export function launchNuke(g: Game, p: Player, tile: number): string | null {
+/** Launch a warhead. tier 0 = Medium Nuke, 1 = Mega Nuke. */
+export function launchNuke(g: Game, p: Player, tile: number, tier = 0): string | null {
   const s = g.s;
+  const T = NUKE_TIERS[tier];
+  if (!T) return 'Unknown warhead';
   if (!s.settings.nukes) return 'Nukes are disabled in this match';
-  if (p.stock[U.NUKE] < 1) return 'No nuke ready. Build one at a Nuclear Facility.';
+  if (p.stock[T.unit] < 1) return `No ${T.name} ready. Build one at a Nuclear Facility.`;
   const silo = nearestActive(g, p, B.MISSILE_SILO, tile);
   if (!silo) return 'You need a Missile Silo to launch';
   const target = s.owner[tile];
   if (target === p.id) return 'Cannot nuke your own territory';
   const hc = hostileCheck(g, p.id, target);
   if (hc) return hc;
-  p.stock[U.NUKE]--;
+  p.stock[T.unit]--;
   p.stats.nukes++;
-  const f = addFlight(g, 'nuke', p.id, silo.tile, tile, NUKE.flightSeconds * TICK_RATE);
+  const f = addFlight(g, 'nuke', p.id, silo.tile, tile, T.flightSeconds * TICK_RATE, -1, tier);
   g.emit({ e: 'fl', _all: true, f: fpack(f) });
-  g.emit({ e: 'nl', _all: true, id: f.id, o: p.id, tile, target, t1: f.t1 });
-  // diplomatic fallout
+  g.emit({ e: 'nl', _all: true, id: f.id, o: p.id, tile, target, t1: f.t1, tier, from: silo.tile, t0: f.t0 });
+  // diplomatic fallout (a mega nuke is remembered twice as badly)
+  const k = tier + 1;
   for (const q of s.players) {
     if (!q || q.human || !q.alive || q.id === p.id) continue;
-    adjustOpinion(g, q.id, p.id, q.id === target ? NUKE.aiOpinionVictim : NUKE.aiOpinionAll);
+    adjustOpinion(g, q.id, p.id, (q.id === target ? NUKE.aiOpinionVictim : NUKE.aiOpinionAll) * k);
     if (target && (q.allies.includes(target)) && rel(g, q.id, p.id) !== REL.WAR && g.rand() < 0.6) declareWar(g, q.id, p.id, true);
   }
   return null;
@@ -356,7 +378,7 @@ function radarNear(g: Game, q: Player, tile: number): boolean {
   return false;
 }
 
-function adIntercept(g: Game, tile: number, kind: 'missile' | 'nuke' | 'bomber'): boolean {
+function adIntercept(g: Game, tile: number, kind: 'missile' | 'nuke' | 'bomber', tier = 0): boolean {
   const m = g.map;
   for (const d of defendersOf(g, tile)) {
     const q = g.P(d);
@@ -366,7 +388,7 @@ function adIntercept(g: Game, tile: number, kind: 'missile' | 'nuke' | 'bomber')
       const b = g.s.buildings[id]!;
       if (b.level <= 0) continue;
       if (m.dist(b.tile, tile) > (AIRDEF.range + (b.level - 1) * AIRDEF.rangePerLevel) * m.ms) continue;
-      const base = kind === 'missile' ? AIRDEF.missile : kind === 'bomber' ? AIRDEF.bomber : NUKE.autoIntercept;
+      const base = kind === 'missile' ? AIRDEF.missile : kind === 'bomber' ? AIRDEF.bomber : NUKE_TIERS[tier].autoIntercept;
       const chance = kind === 'nuke' ? base * b.level + radar * 0.5 : base + AIRDEF.perLevel * (b.level - 1) + radar;
       if (g.rand() < chance) return true;
     }
@@ -381,7 +403,7 @@ function resolve(g: Game, f: Flight) {
     case 'interceptor': {
       const n = s.flights.find((x) => x.id === f.ref && !x.dead);
       if (!n) return;
-      const ok = g.rand() < NUKE.manualIntercept + (radarNear(g, g.P(f.owner)!, n.to) ? AIRDEF.radarBonus : 0);
+      const ok = g.rand() < NUKE_TIERS[n.tier ?? 0].manualIntercept + (radarNear(g, g.P(f.owner)!, n.to) ? AIRDEF.radarBonus : 0);
       if (ok) {
         n.dead = true;
         g.emit({ e: 'hit', _all: true, id: n.id, tile: n.to, x: 1, k: 1, by: f.owner });
@@ -423,7 +445,7 @@ function resolve(g: Game, f: Flight) {
       return;
     }
     case 'nuke': {
-      if (adIntercept(g, f.to, 'nuke')) {
+      if (adIntercept(g, f.to, 'nuke', f.tier ?? 0)) {
         g.emit({ e: 'hit', _all: true, id: f.id, tile: f.to, x: 1, k: 1 });
         g.emit({ e: 'ic', _all: true, id: f.id, ok: 1, by: owner });
         return;
@@ -458,7 +480,8 @@ function impact(g: Game, launcher: number, center: number, R: number, killMult: 
 
 function detonate(g: Game, f: Flight) {
   const s = g.s, m = g.map;
-  const R = NUKE.radius * m.ms, inner2 = (R * NUKE.innerFrac) ** 2;
+  const tier = f.tier ?? 0, T = NUKE_TIERS[tier];
+  const R = T.radius * m.ms, inner2 = (R * T.innerFrac) ** 2;
   const counts = new Map<number, number>();
   const tiles: number[] = [], d2s: number[] = [];
   m.forRadius(f.to, R, (t, d2) => {
@@ -469,7 +492,7 @@ function detonate(g: Game, f: Flight) {
   });
   for (const [o, c] of counts) {
     const q = g.P(o)!;
-    const frac = Math.min(1, (NUKE.killMult * c) / Math.max(1, q.tiles));
+    const frac = Math.min(1, (T.killMult * c) / Math.max(1, q.tiles));
     q.troops *= 1 - frac;
     q.tanks *= 1 - frac;
     q.pop *= 1 - frac * 0.8;
@@ -487,11 +510,11 @@ function detonate(g: Game, f: Flight) {
     destroyBuilding(g, b, 'nuked');
     if (q && wasCap) relocateCapital(g, q);
   }
-  for (let i = 0; i < tiles.length; i++) g.setFallout(tiles[i], d2s[i] <= inner2 ? NUKE.falloutSeconds : NUKE.falloutSeconds * 0.6);
+  for (let i = 0; i < tiles.length; i++) g.setFallout(tiles[i], d2s[i] <= inner2 ? T.falloutSeconds : T.falloutSeconds * 0.6);
   const r2 = R * R;
   for (const sh of s.ships) if (m.dist2(sh.tile, f.to) <= r2) sh.hp = 0;
-  s.winter++;
-  g.emit({ e: 'nuke', _all: true, id: f.id, tile: f.to, r: R, by: f.owner, fall: NUKE.falloutSeconds });
+  s.winter += T.winter;
+  g.emit({ e: 'nuke', _all: true, id: f.id, tile: f.to, r: R, by: f.owner, fall: T.falloutSeconds, tier });
   if (s.settings.nuclearWinter && s.winter > NUKE.winterThreshold) g.emit({ e: 'winter', _all: true, v: s.winter });
   for (const [o] of counts) {
     const q = g.P(o)!;

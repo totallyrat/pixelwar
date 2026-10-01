@@ -15,8 +15,11 @@ import {
   placeBuilding, upgradeBuilding, demolishBuilding, stepBuildings, destroyBuilding, transferBuilding, relocateCapital, bpack, slotsTotal,
 } from './buildings.ts';
 import {
-  queueUnit, cancelQueue, moveWarships, invade, stepShips, launchMissile, launchNuke, interceptNuke, launchBomber, stepFlights, sinkShipsOf,
+  queueUnit, cancelQueue, moveWarships, invade, stepShips, launchMissile, launchNuke, interceptNuke, launchBomber, stepFlights, sinkShipsOf, maxLevel,
 } from './units.ts';
+import {
+  createOp, addStep, editStep, removeStep, retime, inviteToOp, answerOp, leaveOp, launchOp, cancelOp, stepOps,
+} from './ops.ts';
 import { rel, propose, respond, declareWar, breakTreaty, donate, driftOpinions, setRel, expirePacts } from './diplomacy.ts';
 import { computeVision } from './vision.ts';
 import { aiThink, setupAI } from './ai.ts';
@@ -41,6 +44,7 @@ export class Game {
   constructor(map: GameMap, settings: MatchSettings, seed: number, state?: State) {
     this.map = map;
     this.s = state ?? this.freshState(settings, seed);
+    if (state) migrate(this.s);
     this.changeStamp = new Uint32Array(map.N);
     this.BW = Math.ceil(map.W / VISION.block);
     this.BH = Math.ceil(map.H / VISION.block);
@@ -77,6 +81,7 @@ export class Game {
       opinion: new Int8Array(MAXP * MAXP),
       proposals: [],
       napUntil: new Map(),
+      operations: [],
       nextId: 1,
       winter: 0,
       winterTimer: 0,
@@ -399,6 +404,7 @@ export class Game {
       stepBuildings(this);
       stepShips(this);
       stepFlights(this);
+      stepOps(this);
       for (const p of s.players) {
         if (p && p.alive && p.ai && p.ai.next <= s.tick) {
           aiThink(this, p);
@@ -465,7 +471,9 @@ export class Game {
       const top = alive.sort((a, b) => b.score - a.score)[0];
       return this.endGame(top ? [top.id] : [], 'All human nations have fallen');
     }
-    if (s.humansAtStart >= 2 && aliveH.length >= 1) {
+    // "last human (alliance) standing" only counts once human rivals were actually knocked out,
+    // otherwise friends playing as a team (or simply allying) would win on the spot
+    if (s.humansAtStart >= 2 && aliveH.length >= 1 && aliveH.length < humans.length) {
       const first = aliveH[0];
       const allAllied = aliveH.every((p) => p === first || rel(this, first.id, p.id) === REL.ALLY);
       if (aliveH.length === 1 || (set.sharedVictory && allAllied)) {
@@ -528,7 +536,7 @@ export class Game {
       case 'untrain': cancelQueue(this, p, Math.floor(num(m.u, -1))); break;
       case 'tech': r = buyTech(this, p, m.w === 'def' ? 'def' : 'off'); break;
       case 'missile': r = tileOk ? launchMissile(this, p, tile) : 'Bad tile'; break;
-      case 'nuke': r = tileOk ? launchNuke(this, p, tile) : 'Bad tile'; break;
+      case 'nuke': r = tileOk ? launchNuke(this, p, tile, num(m.tier, 0) === 1 ? 1 : 0) : 'Bad tile'; break;
       case 'intercept': r = interceptNuke(this, p, Math.floor(num(m.id, 0))); break;
       case 'bomb': r = tileOk ? launchBomber(this, p, tile) : 'Bad tile'; break;
       case 'invade': r = tileOk ? invade(this, p, tile, frac) : 'Bad tile'; break;
@@ -539,6 +547,17 @@ export class Game {
       case 'break': r = breakTreaty(this, pid, other); break;
       case 'donate': r = donate(this, pid, other, Math.max(0, Math.min(1, num(m.troops, 0))), Math.max(0, Math.min(1, num(m.money, 0)))); break;
       case 'surrender': this.eliminate(p, 0); break;
+      // operations
+      case 'opNew': { const o = createOp(this, pid, other, m.name); if (typeof o === 'string') r = o; else this.emit({ e: 'opMade', _to: pid, id: o.id }); break; }
+      case 'opStep': r = addStep(this, pid, num(m.op, 0), m.kind, tile, frac, num(m.delay, 0)); break;
+      case 'opEdit': r = editStep(this, pid, num(m.op, 0), num(m.step, 0), typeof m.delay === 'number' ? m.delay : undefined, typeof m.pct === 'number' ? m.pct : undefined); break;
+      case 'opDel': r = removeStep(this, pid, num(m.op, 0), num(m.step, 0)); break;
+      case 'opTime': r = retime(this, pid, num(m.op, 0), m.mode, num(m.gap, 5)); break;
+      case 'opInvite': r = inviteToOp(this, pid, num(m.op, 0), other); break;
+      case 'opAnswer': r = answerOp(this, pid, num(m.op, 0), !!m.yes); break;
+      case 'opLeave': r = leaveOp(this, pid, num(m.op, 0)); break;
+      case 'opLaunch': r = launchOp(this, pid, num(m.op, 0), num(m.cd, 0)); break;
+      case 'opCancel': r = cancelOp(this, pid, num(m.op, 0)); break;
     }
     if (r) this.err(pid, r);
   }
@@ -573,7 +592,20 @@ export class Game {
       tech: [p.techOff, p.techDef], atk, traitor: p.traitorUntil > this.s.tick ? p.traitorUntil : 0,
       ships: this.s.ships.filter((sh) => sh.owner === p.id && sh.type === U.WARSHIP).length,
       winter: this.s.winter,
+      nfl: maxLevel(this, p, B.NUCLEAR_FACILITY),
     };
+  }
+}
+
+/** Bring snapshots written by older versions up to the current state shape. */
+function migrate(s: State) {
+  s.operations ??= [];
+  for (const f of s.flights) f.tier ??= 0;
+  for (const p of s.players) {
+    if (!p) continue;
+    while (p.stock.length < UNIT_COUNT) p.stock.push(0);
+    while (p.queue.length < UNIT_COUNT) p.queue.push(0);
+    while (p.qprog.length < UNIT_COUNT) p.qprog.push(0);
   }
 }
 

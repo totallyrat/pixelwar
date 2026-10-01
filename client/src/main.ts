@@ -31,6 +31,7 @@ export class App {
       tap: (t) => { if (this.screen === 'game') this.hud.tap(t); },
       doubleTap: (t) => { if (this.screen === 'game') this.hud.quickAttack(t); },
       secondary: (t) => { if (this.screen === 'game') this.hud.quickAttack(t); },
+      hold: (t, x, y) => { if (this.screen === 'game') this.hud.hold(t, x, y); },
       hover: (t) => { if (this.renderer.hover !== t) { this.renderer.hover = t; if (this.renderer.mode || this.world.phase === 'spawn') this.renderer.needs = true; } },
       escape: () => { if (this.screen === 'game') this.hud.escape(); },
       key: (k) => { if (this.screen === 'game') this.hud.key(k); },
@@ -40,15 +41,7 @@ export class App {
     w.onInit = () => this.enterGame();
     w.onTiles = (list) => this.renderer.updateTiles(list);
     w.onVis = (blocks) => this.renderer.updateBlocks(blocks);
-    w.onEvent = (e) => {
-      if (this.screen !== 'game') return;
-      this.hud.onEvent(e);
-      // follow our auto-assigned capital when the spawn phase ends
-      if (e.e === 'phase' && e.phase === 'running') {
-        const me = w.P(w.myId);
-        if (me && me.capital >= 0) this.renderer.centerOn(me.capital, Math.max(this.renderer.cam.z, 4));
-      }
-    };
+    w.onEvent = (e) => { if (this.screen === 'game') this.hud.onEvent(e); };
     w.onTick = () => { if (this.screen === 'game') this.hud.update(); };
 
     const net = this.net;

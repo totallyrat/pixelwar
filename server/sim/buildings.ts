@@ -52,7 +52,7 @@ export function placeBuilding(g: Game, p: Player, t: number, type: number, insta
   if (!instant) {
     const e = canPlace(g, p, t, type);
     if (e) return e;
-    const c = buildCost(type, 0);
+    const c = buildCost(type, 0, p.btype[type].length);
     if (!canAfford(p, c)) return 'Not enough resources';
     pay(p, c);
   }

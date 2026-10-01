@@ -72,26 +72,27 @@ export interface BuildingDef {
   maxLevel: number;
   req?: 'oil' | 'uranium' | 'coast';
   slot: boolean;          // consumes a building slot (cities provide slots)
+  scale: number;          // each one you already own adds this fraction of the base cost to the next
 }
 export const BUILDINGS: BuildingDef[] = [
-  { key: 'none', name: '', desc: '', cost: {}, time: 0, maxLevel: 0, slot: false },
-  { key: 'city', name: 'City', desc: '+Pop cap, +money, +6 building slots per level', cost: { money: 700, prod: 150 }, time: 18, maxLevel: 5, slot: false },
-  { key: 'farm', name: 'Farm', desc: '+Food (best on plains)', cost: { money: 150 }, time: 7, maxLevel: 3, slot: true },
-  { key: 'factory', name: 'Factory', desc: '+Production', cost: { money: 350, prod: 30 }, time: 10, maxLevel: 3, slot: true },
-  { key: 'oil', name: 'Oil Well', desc: '+Oil. Must sit on an oil deposit', cost: { money: 300, prod: 80 }, time: 10, maxLevel: 3, req: 'oil', slot: true },
-  { key: 'uranium', name: 'Uranium Mine', desc: '+Uranium. Must sit on a uranium deposit', cost: { money: 500, prod: 200 }, time: 14, maxLevel: 3, req: 'uranium', slot: true },
-  { key: 'barracks', name: 'Barracks', desc: 'Faster troop recruitment', cost: { money: 250, prod: 50 }, time: 8, maxLevel: 3, slot: true },
-  { key: 'tankfac', name: 'Tank Factory', desc: 'Builds tanks', cost: { money: 700, prod: 300 }, time: 16, maxLevel: 3, slot: true },
-  { key: 'shipyard', name: 'Shipyard', desc: 'Builds warships & transports. Coast only', cost: { money: 600, prod: 250 }, time: 16, maxLevel: 3, req: 'coast', slot: true },
-  { key: 'airbase', name: 'Airbase', desc: 'Builds fighters & bombers', cost: { money: 900, prod: 450, oil: 40 }, time: 20, maxLevel: 3, slot: true },
-  { key: 'radar', name: 'Radar', desc: 'Reveals fog, boosts nearby air defense', cost: { money: 450, prod: 150 }, time: 12, maxLevel: 3, slot: true },
-  { key: 'airdef', name: 'Air Defense', desc: 'Shoots down missiles, nukes & bombers', cost: { money: 700, prod: 350 }, time: 15, maxLevel: 3, slot: true },
-  { key: 'bunker', name: 'Bunker', desc: 'Nearby tiles are much harder to capture', cost: { money: 350, prod: 250 }, time: 12, maxLevel: 3, slot: true },
-  { key: 'silo', name: 'Missile Silo', desc: 'Builds & launches missiles, launches nukes', cost: { money: 1800, prod: 900, oil: 60 }, time: 30, maxLevel: 3, slot: true },
-  { key: 'nuclear', name: 'Nuclear Facility', desc: 'Builds nuclear warheads', cost: { money: 4000, prod: 2000, uranium: 60 }, time: 60, maxLevel: 2, slot: true },
+  { key: 'none', name: '', desc: '', cost: {}, time: 0, maxLevel: 0, slot: false, scale: 0 },
+  { key: 'city', name: 'City', desc: '+Pop cap, +money, +6 building slots per level', cost: { money: 700, prod: 150 }, time: 18, maxLevel: 5, slot: false, scale: 0.3 },
+  { key: 'farm', name: 'Farm', desc: '+Food (best on plains)', cost: { money: 150 }, time: 7, maxLevel: 3, slot: true, scale: 0.12 },
+  { key: 'factory', name: 'Factory', desc: '+Production', cost: { money: 350, prod: 30 }, time: 10, maxLevel: 3, slot: true, scale: 0.18 },
+  { key: 'oil', name: 'Oil Well', desc: '+Oil. Must sit on an oil deposit', cost: { money: 300, prod: 80 }, time: 10, maxLevel: 3, req: 'oil', slot: true, scale: 0.15 },
+  { key: 'uranium', name: 'Uranium Mine', desc: '+Uranium. Must sit on a uranium deposit', cost: { money: 500, prod: 200 }, time: 14, maxLevel: 3, req: 'uranium', slot: true, scale: 0.2 },
+  { key: 'barracks', name: 'Barracks', desc: 'Faster troop recruitment', cost: { money: 250, prod: 50 }, time: 8, maxLevel: 3, slot: true, scale: 0.22 },
+  { key: 'tankfac', name: 'Tank Factory', desc: 'Builds tanks', cost: { money: 700, prod: 300 }, time: 16, maxLevel: 3, slot: true, scale: 0.35 },
+  { key: 'shipyard', name: 'Shipyard', desc: 'Builds warships & transports. Coast only', cost: { money: 600, prod: 250 }, time: 16, maxLevel: 3, req: 'coast', slot: true, scale: 0.3 },
+  { key: 'airbase', name: 'Airbase', desc: 'Builds fighters & bombers', cost: { money: 900, prod: 450, oil: 40 }, time: 20, maxLevel: 3, slot: true, scale: 0.4 },
+  { key: 'radar', name: 'Radar', desc: 'Reveals fog, boosts nearby air defense', cost: { money: 450, prod: 150 }, time: 12, maxLevel: 3, slot: true, scale: 0.3 },
+  { key: 'airdef', name: 'Air Defense', desc: 'Shoots down missiles, nukes & bombers', cost: { money: 700, prod: 350 }, time: 15, maxLevel: 3, slot: true, scale: 0.25 },
+  { key: 'bunker', name: 'Bunker', desc: 'Nearby tiles are much harder to capture', cost: { money: 350, prod: 250 }, time: 12, maxLevel: 3, slot: true, scale: 0.2 },
+  { key: 'silo', name: 'Missile Silo', desc: 'Builds & launches missiles, launches nukes', cost: { money: 1800, prod: 900, oil: 60 }, time: 30, maxLevel: 3, slot: true, scale: 0.5 },
+  { key: 'nuclear', name: 'Nuclear Facility', desc: 'Builds nuclear warheads. Lv 2 unlocks the Mega Nuke', cost: { money: 4000, prod: 2000, uranium: 60 }, time: 60, maxLevel: 2, slot: true, scale: 1.0 },
 ];
 export const UPGRADE_COST_MULT = 1.8;       // cost of level L+1 = base * mult^L
-export const UPGRADE_TIME_MULT = 0.9;       // time of level L+1 = base * mult * L
+export const UPGRADE_TIME = 0.5;            // upgrading takes half the time of building a new one
 export const DEMOLISH_REFUND = 0.3;
 export const BUILDING_SPACING = 2;          // min Chebyshev gap (ref tiles) between buildings
 
@@ -107,17 +108,28 @@ export const EFFECT = {
 };
 
 // ---- units ------------------------------------------------------------------------------
-export const U = { TANK: 0, WARSHIP: 1, TRANSPORT: 2, FIGHTER: 3, BOMBER: 4, MISSILE: 5, NUKE: 6 } as const;
-export const UNIT_COUNT = 7;
-export interface UnitDef { key: string; name: string; desc: string; cost: Cost; time: number; building: number; upkeep: number }
+export const U = { TANK: 0, WARSHIP: 1, TRANSPORT: 2, FIGHTER: 3, BOMBER: 4, MISSILE: 5, NUKE: 6, MEGA_NUKE: 7 } as const;
+export const UNIT_COUNT = 8;
+export interface UnitDef {
+  key: string; name: string; desc: string; cost: Cost; time: number; building: number; upkeep: number;
+  minLevel?: number;      // required level of one building of that type
+  scale?: number;         // each one in stock/queue adds this fraction of the base cost to the next
+}
 export const UNITS: UnitDef[] = [
   { key: 'tank', name: 'Tank', desc: 'Armoured battalion: worth 120 infantry on plains, weak in forest/mountains. Costs no population.', cost: { money: 300, prod: 150, oil: 12 }, time: 5, building: B.TANK_FACTORY, upkeep: 0.2 },
   { key: 'warship', name: 'Warship', desc: 'Sinks enemy ships, shells coasts', cost: { money: 500, prod: 300, oil: 40 }, time: 22, building: B.SHIPYARD, upkeep: 0.6 },
   { key: 'transport', name: 'Transport', desc: 'Carries troops for naval invasions', cost: { money: 150, prod: 60, oil: 8 }, time: 7, building: B.SHIPYARD, upkeep: 0.1 },
   { key: 'fighter', name: 'Fighter', desc: 'Intercepts enemy bombers near your airbases', cost: { money: 350, prod: 200, oil: 30 }, time: 14, building: B.AIRBASE, upkeep: 0.4 },
   { key: 'bomber', name: 'Bomber', desc: 'Strikes buildings & troops within airbase range', cost: { money: 600, prod: 300, oil: 50 }, time: 18, building: B.AIRBASE, upkeep: 0.5 },
-  { key: 'missile', name: 'Missile', desc: 'Conventional strike, range-limited', cost: { money: 900, prod: 450, oil: 40 }, time: 18, building: B.MISSILE_SILO, upkeep: 0 },
-  { key: 'nuke', name: 'Nuke', desc: 'Devastating. Everyone will see the launch.', cost: { money: 5000, prod: 2500, uranium: 120 }, time: 90, building: B.NUCLEAR_FACILITY, upkeep: 0 },
+  { key: 'missile', name: 'Missile', desc: 'Conventional strike, range-limited', cost: { money: 900, prod: 450, oil: 40 }, time: 18, building: B.MISSILE_SILO, upkeep: 0, scale: 0.1 },
+  { key: 'nuke', name: 'Medium Nuke', desc: 'Flattens a whole region. Everyone will see the launch.', cost: { money: 5000, prod: 2500, uranium: 120 }, time: 90, building: B.NUCLEAR_FACILITY, upkeep: 0, scale: 0.4 },
+  { key: 'mega', name: 'Mega Nuke', desc: 'Wipes out a big chunk of a country. Needs a Lv 2 Nuclear Facility.', cost: { money: 22000, prod: 12000, uranium: 480 }, time: 200, building: B.NUCLEAR_FACILITY, upkeep: 0, minLevel: 2, scale: 0.6 },
+];
+
+/** Warhead tiers, indexed by tier (0 = Medium Nuke, 1 = Mega Nuke). Distances in ref tiles. */
+export const NUKE_TIERS = [
+  { unit: U.NUKE, name: 'Medium Nuke', radius: 16, innerFrac: 0.55, flightSeconds: 15, falloutSeconds: 160, killMult: 3, autoIntercept: 0.22, manualIntercept: 0.5, winter: 1 },
+  { unit: U.MEGA_NUKE, name: 'Mega Nuke', radius: 36, innerFrac: 0.62, flightSeconds: 20, falloutSeconds: 260, killMult: 6, autoIntercept: 0.1, manualIntercept: 0.3, winter: 3 },
 ];
 
 export const TECH = {
@@ -204,14 +216,8 @@ export const MISSILE = {
   buildingImmune: [B.CITY] as number[], // capitals are only harmed by nukes; cities take damage (downgrade)
 };
 
+/** Rules shared by both warhead tiers (per-tier numbers live in NUKE_TIERS). */
 export const NUKE = {
-  radius: 11,
-  innerFrac: 0.55,        // inner part is wiped clean (tiles become neutral)
-  flightSeconds: 15,      // real-time interception window
-  falloutSeconds: 150,
-  killMult: 3,
-  autoIntercept: 0.22,    // per air-defense level in range
-  manualIntercept: 0.5,   // per interceptor (conventional missile) fired
   manualRangeMult: 1.8,   // interceptor must come from a silo within missile range * this
   aiOpinionAll: -30,
   aiOpinionVictim: -90,
@@ -251,6 +257,18 @@ export const VISION = { block: 8, marginBlocks: 1, shipBlocks: 1 };
 
 export const DIPLO = { napSeconds: 300, proposalSeconds: 30 };
 
+/** Planned operations: timed, multi-step (and multi-nation) strikes. Times are real seconds. */
+export const OPS = {
+  maxActive: 6,           // planning / countdown / running operations per owner
+  maxSteps: 16,
+  maxDelay: 600,
+  maxCountdown: 180,
+  defaultGap: 5,          // seconds between steps in "sequence" mode
+  keepSeconds: 90,        // finished operations stay visible this long
+  aiInviteSeconds: 180,   // an AI invites a human ally to at most one operation per this period
+  aiCountdown: 45,        // AI-led operations give invited allies this long to join
+};
+
 // ---- AI -----------------------------------------------------------------------------------
 export const AI_LEVELS = ['passive', 'defensive', 'aggressive'] as const;
 export const AI = {
@@ -282,12 +300,24 @@ export function scaleCost(c: Cost, m: number): Cost {
   if (c.uranium) r.uranium = Math.round(c.uranium * m);
   return r;
 }
-export function buildCost(type: number, level: number): Cost {
+/**
+ * Cost of a building. level 0 = a new one, where `owned` (how many of that type you already have,
+ * including ones under construction) makes each extra copy pricier. level >= 1 = upgrading an existing
+ * building from that level, which does not depend on how many you own.
+ */
+export function buildCost(type: number, level: number, owned = 0): Cost {
+  if (level === 0) return scaleCost(BUILDINGS[type].cost, 1 + BUILDINGS[type].scale * owned);
   return scaleCost(BUILDINGS[type].cost, UPGRADE_COST_MULT ** level);
 }
+/** Seconds to build (level 0) or to upgrade from `level` (always half of a new build). */
 export function buildTime(type: number, level: number): number {
   const d = BUILDINGS[type];
-  return level === 0 ? d.time : d.time * UPGRADE_TIME_MULT * (level + 1);
+  return level === 0 ? d.time : d.time * UPGRADE_TIME;
+}
+/** Cost of the next unit given how many are already stockpiled + queued (only warheads scale). */
+export function unitCost(u: number, have = 0): Cost {
+  const d = UNITS[u];
+  return d.scale ? scaleCost(d.cost, 1 + d.scale * have) : d.cost;
 }
 
 export const HUMAN_COLORS = [

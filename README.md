@@ -35,32 +35,51 @@ and players reconnect automatically (sessions are remembered per browser tab).
 
 - **Spawn phase (20 s):** tap anywhere on land to found your capital (tap again to move it).
   AI nations then appear at random places around the world, just as small as you.
-- **Expand / attack:** set **SEND TROOPS %** in the bottom bar, then **double-tap** or
-  **long-press** a tile (desktop: **right-click**, or right-drag and release). Your troops spread
-  from your border as a wave, pulled toward the spot you picked. Plains are cheap, forest and
-  mountains are slow and costly, bunkers make tiles far harder to take. Opposing fronts cancel out.
-- **Tap** a tile for its info card and context actions (build, upgrade, attack, invade by sea,
-  missile/bomber/nuke, diplomacy). Pinch or scroll to zoom, drag to pan, tap the minimap to jump.
+- **Hold any pixel** (finger or mouse button) to open the **quick menu**, a ring of buttons around
+  your finger. Slide onto one and let go, or lift and tap. On your land it's **Quick Build**
+  (City, Farm, Factory, Barracks, Bunker, Air Defense, Oil Well/Uranium Mine/Shipyard when possible,
+  upgrade), placed on the nearest free spot. On other land: Attack, All-out, Invade, Missile, Bomber,
+  Medium/Mega Nuke (tap twice to confirm), Add to operation / Plan operation, Diplomacy.
+- **Expand / attack:** set **SEND TROOPS %** in the bottom bar, then **double-tap** a tile
+  (desktop: **right-click**, or right-drag and release). Your troops spread from your border as a
+  wave, pulled toward the spot you picked. Plains are cheap, forest and mountains are slow and costly,
+  bunkers make tiles far harder to take. Opposing fronts cancel out.
+- **Tap** a tile for its info card. Pinch or scroll to zoom, drag to pan, tap the minimap to jump.
 - **Economy:** Farms feed your people (starvation leads to desertion, unrest and rebellion). Cities
   raise population, income and building slots. Factories give production. Oil wells and uranium mines
-  must sit on deposits (black and green dots on the map).
+  must sit on deposits (black and green dots on the map). **Every extra copy of a building costs more**
+  (e.g. +30% of the base price per city you own), while **upgrading takes half the time** of building
+  new and doesn't get pricier, so growing tall is often better than growing wide.
 - **Army:** Mobilization sets the share of the population under arms. Barracks recruit faster.
   Tank battalions cost no population and dominate open terrain.
 - **Navy:** Shipyards (coast) build warships, which sink enemy ships and shell coasts, and transports
   for naval invasions.
 - **Strategic weapons:** Silos launch range-limited missiles; Air Defense (boosted by Radar) shoots
-  them down. Nukes need a Nuclear Facility, a Silo and uranium. Every launch triggers a **global alert**
-  with a **15 s interception window**: defenders can fire an interceptor from the alert. Detonations
-  wipe the core, leave fallout, and make AI nations turn on the launcher. Too many detonations cause
-  **nuclear winter**, which cuts food output for everyone.
+  them down. Nuclear weapons come in two tiers:
+  - **Medium Nuke:** needs a Nuclear Facility, a Silo and uranium. It flattens a whole region.
+  - **Mega Nuke:** needs a Level 2 Nuclear Facility. It erases a big chunk of a country, has a longer
+    fallout, and does three times the nuclear-winter damage.
+
+  Every launch triggers a **global alert** with an interception window (15 s Medium, 20 s Mega).
+  Defenders can fire an interceptor from the alert, and anyone can press **VIEW** to ride along with
+  the warhead in a letterboxed cinematic. Detonations shake every player's screen, wipe the core,
+  leave fallout, and make AI nations turn on the launcher. Too many cause **nuclear winter**, which
+  cuts food output for everyone.
+- **Operations (OPS button):** plan a strike against one nation as a series of steps: land attacks,
+  naval invasions, missile, bomber and nuclear strikes, and fleet moves.
+  - Fire every step **at once**, or **in sequence** 2/5/10/20 s apart, with per-step fine-tuning.
+    Launch now or from an H-hour countdown.
+  - Plans show as arrows on the map, and the panel reports every step's result.
+  - **Allied operations:** invite allies and they add steps with their own forces. AI allies decide
+    for themselves whether to join, and an AI at war may invite you to its operation during the countdown.
 - **Diplomacy:** non-aggression pacts (5 min), alliances (shared vision, aid, optional shared victory),
   war declarations and **betrayal** (breaking a treaty makes you a traitor for 2 minutes: weaker
   defence, and every AI remembers). Chat (global / alliance) and map pings.
 - **Win:** control **70 %** of the world's land (alone or as an alliance), be the last human nation or
   alliance standing, or have the top score when the optional time limit ends.
 
-**Keys:** WASD/arrows pan · +/- zoom · 1-9 troop % · B build · R army · G diplomacy · T chat ·
-L ranks · H home · P ping · Esc cancel.
+**Keys:** WASD/arrows pan · +/- zoom · 1-9 troop % · B build · R army · O operations · G diplomacy ·
+T chat · L ranks · H home · P ping · Esc cancel.
 
 ## Architecture
 
@@ -69,9 +88,10 @@ shared/   balance.ts (ALL gameplay numbers), mapdata.ts (map format + geometry),
 server/   main.ts (HTTP + WebSocket + persistence), room.ts (lobby, tick loop, per-client diffs)
           sim/  game.ts (tick orchestration, territory, spawning, win), combat.ts (conquest wave),
                 economy.ts, buildings.ts, units.ts (ships/flights/nukes), nav.ts (naval A*),
-                diplomacy.ts, vision.ts (fog), ai.ts (AI nations)
+                diplomacy.ts, ops.ts (planned & allied operations), vision.ts (fog), ai.ts (AI nations)
 client/   src/ main.ts, net.ts, world.ts (client mirror), input.ts (touch/mouse/keys), audio.ts (synth SFX),
-          render/ renderer.ts (chunked canvas), sprites.ts (pixel glyphs), ui/ hud.ts, lobby.ts
+          render/ renderer.ts (chunked canvas, particles, cinematic camera), sprites.ts (pixel glyphs),
+          ui/ hud.ts, quickmenu.ts (hold ring menu), opsview.ts (operations panel), lobby.ts
 tools/    mapgen/ (Natural Earth -> pixel map), start/share/dev launchers, bench.ts, selftest.ts
 ```
 
@@ -110,8 +130,10 @@ on the large map. Run `npm run bench -- medium 500 600` to reproduce.
   units, economy, combat, missiles/nukes, AI personalities, win and score. Distances are in tiles on
   the 1024 map and scale automatically.
 - `npm run dev` runs a hot-reloading client on :5173 and an auto-restarting server on :8080.
-- `node tools/selftest.ts` drives two scripted humans through every system (building, units,
-  alliance, betrayal, missiles, bombers, naval invasion, nuke + interception, fallout, snapshot restore).
+- `node tools/selftest.ts` drives two scripted humans through every system: escalating prices and
+  half-time upgrades, all units including the Mega Nuke, alliance, allied operations (sequencing,
+  timing, AI ally decisions), betrayal, missiles, bombers, naval invasion, nukes with interception,
+  fallout, and snapshot restore.
 - `npm run mapgen` regenerates the maps (`PREVIEW=1` also writes PNG previews to `tools/mapgen/cache`).
 - `npm run typecheck`.
 - Testing several players on one PC: open another tab with `http://localhost:8080/?new`.

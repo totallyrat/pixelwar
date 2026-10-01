@@ -2,10 +2,15 @@
 // with changed tiles are re-uploaded. Everything else (buildings, ships, flights, effects, labels)
 // is drawn as an overlay each frame, and frames are only drawn when something changed/animates.
 
-import { TERRAIN, T, RES, LIMITS, NUKE, MISSILE, AIR, B, SPAWN, TICK_MS, TICK_RATE, buildTime } from '../../../shared/balance.ts';
-import type { World } from '../world.ts';
+import { TERRAIN, T, RES, LIMITS, NUKE_TIERS, MISSILE, AIR, B, SPAWN, TICK_MS, TICK_RATE, buildTime } from '../../../shared/balance.ts';
+import type { World, OpC } from '../world.ts';
 import { badge, shipSprite, star, cssColor, glyphCanvas } from './sprites.ts';
 import { fmt, clamp } from '../util.ts';
+
+interface Particle { x: number; y: number; vx: number; vy: number; life: number; max: number; size: number; grow: number; r: number; g: number; b: number; kind: number }
+interface CamAnim { x0: number; y0: number; z0: number; x1: number; y1: number; z1: number; t0: number; dur: number; done?: () => void }
+const easeInOut = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2);
+export const OP_KIND_GLYPH: Record<string, string> = { attack: 'troops', invade: 'transport', missile: 'missile', bomb: 'bomber', nuke: 'nuke', mega: 'nuke', fleet: 'warship' };
 
 const CS = 128;
 const MAXP = LIMITS.maxPlayers;
@@ -22,7 +27,11 @@ const WHITE = 0xffffffff;
 const FALLOUT = abgr(0x7dff3a);
 
 interface Chunk { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D; img: ImageData; u32: Uint32Array; x0: number; y0: number; w: number; h: number; dirty: boolean }
-export interface Fx { kind: 'boom' | 'nuke' | 'intercept' | 'ping' | 'sink' | 'land'; tile: number; r: number; t0: number; dur: number; color?: string; text?: string; big?: boolean }
+export interface Fx { kind: 'boom' | 'nuke' | 'intercept' | 'ping' | 'sink' | 'land' | 'found'; tile: number; r: number; t0: number; dur: number; color?: string; text?: string; big?: boolean }
+const hexRgb = (css: string): [number, number, number] => {
+  const n = parseInt(css.replace('#', ''), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+};
 
 export class Renderer {
   readonly canvas: HTMLCanvasElement;
@@ -55,8 +64,18 @@ export class Renderer {
   private mmAt = 0;
   private mapChanged = true;
   private flash = 0;
-  private shake = 0;
+  private shakeAmp = 0;
+  private shakeDecay = 0.9;
   private lastFrame = 0;
+  private particles: Particle[] = [];
+  private camAnim: CamAnim | null = null;
+  private follow: (() => { x: number; y: number; z: number } | null) | null = null;
+  private cine = 0;          // letterbox amount 0..1
+  cineOn = false;
+  cineText = '';
+  onCineChange: (on: boolean) => void = () => {};
+  showOps = false;
+  opFocus = 0;
   onFrame: () => void = () => {};
 
   constructor(canvas: HTMLCanvasElement, world: World) {
@@ -207,8 +226,9 @@ export class Renderer {
     const half = this.ch / 2 / c.z;
     c.y = this.H <= half * 2 ? this.H / 2 : clamp(c.y, half, this.H - half);
   }
-  pan(dx: number, dy: number) { this.cam.x -= dx / this.cam.z; this.cam.y -= dy / this.cam.z; this.clampCam(); this.needs = true; }
+  pan(dx: number, dy: number) { this.interrupt(); this.cam.x -= dx / this.cam.z; this.cam.y -= dy / this.cam.z; this.clampCam(); this.needs = true; }
   zoomAt(sx: number, sy: number, f: number) {
+    this.interrupt();
     const c = this.cam;
     const wx = c.x + (sx - this.cw / 2) / c.z, wy = c.y + (sy - this.ch / 2) / c.z;
     c.z = clamp(c.z * f, this.minZoom(), 48);
@@ -218,11 +238,129 @@ export class Renderer {
     this.needs = true;
   }
   centerOn(t: number, z?: number) {
+    this.interrupt();
     this.cam.x = (t % this.W) + 0.5;
     this.cam.y = ((t / this.W) | 0) + 0.5;
     if (z) this.cam.z = z;
     this.clampCam();
     this.needs = true;
+  }
+
+  // ---- camera animation & cinematics --------------------------------------------------------------
+  /** Smoothly fly the camera to a tile (or world point) and zoom. */
+  flyTo(t: number | { x: number; y: number }, z: number, dur = 1000, done?: () => void) {
+    const x1 = typeof t === 'number' ? (t % this.W) + 0.5 : t.x, y1 = typeof t === 'number' ? ((t / this.W) | 0) + 0.5 : t.y;
+    let dx = x1 - this.cam.x;
+    if (dx > this.W / 2) dx -= this.W; else if (dx < -this.W / 2) dx += this.W;
+    this.camAnim = { x0: this.cam.x, y0: this.cam.y, z0: this.cam.z, x1: this.cam.x + dx, y1, z1: clamp(z, this.minZoom(), 48), t0: performance.now(), dur, done };
+    this.needs = true;
+  }
+  /** Letterboxed cinematic that tracks a moving target every frame; ends when `fn` returns null. */
+  cinematic(fn: () => { x: number; y: number; z: number } | null, text: string) {
+    this.camAnim = null;
+    this.follow = fn;
+    this.cineText = text;
+    this.setCine(true);
+  }
+  setCine(on: boolean) {
+    if (this.cineOn === on) return;
+    this.cineOn = on;
+    this.onCineChange(on);
+    this.needs = true;
+  }
+  endCinematic() {
+    this.follow = null;
+    this.camAnim = null;
+    this.setCine(false);
+  }
+  /** User input takes the camera back. */
+  private interrupt() {
+    if (this.follow || this.camAnim || this.cineOn) this.endCinematic();
+  }
+  private updateCamera(now: number, dt: number) {
+    const c = this.cam;
+    if (this.camAnim) {
+      const a = this.camAnim;
+      const t = clamp((now - a.t0) / a.dur, 0, 1), e = easeInOut(t);
+      c.x = a.x0 + (a.x1 - a.x0) * e;
+      c.y = a.y0 + (a.y1 - a.y0) * e;
+      // zoom interpolates in log space so it feels even
+      c.z = Math.exp(Math.log(a.z0) + (Math.log(a.z1) - Math.log(a.z0)) * e);
+      this.clampCam();
+      if (t >= 1) { this.camAnim = null; a.done?.(); }
+    } else if (this.follow) {
+      const tgt = this.follow();
+      if (!tgt) { this.follow = null; return; }
+      let dx = tgt.x - c.x;
+      if (dx > this.W / 2) dx -= this.W; else if (dx < -this.W / 2) dx += this.W;
+      // exponential smoothing in real time, so slow devices track just as tightly
+      const kp = 1 - Math.exp(-dt * 7), kz = 1 - Math.exp(-dt * 3.2);
+      c.x += dx * kp;
+      c.y += (tgt.y - c.y) * kp;
+      c.z = Math.exp(Math.log(c.z) + (Math.log(tgt.z) - Math.log(c.z)) * kz);
+      this.clampCam();
+    }
+  }
+
+  /** Opening shot: dive into the capital, pyrotechnics, then settle at a playable zoom. */
+  intro(tile: number, color: number) {
+    this.setCine(true);
+    this.cineText = 'YOUR NATION RISES';
+    this.flyTo(tile, 22, 1500, () => {
+      this.addFx({ kind: 'found', tile, r: 3, dur: 2600, color: cssColor(color) });
+      this.shake(9, 0.93);
+      setTimeout(() => {
+        if (!this.cineOn) return;
+        this.flyTo(tile, 7, 1300, () => this.setCine(false));
+      }, 2300);
+    });
+  }
+
+  shake(px: number, decay = 0.9) {
+    if (px > this.shakeAmp) { this.shakeAmp = px; this.shakeDecay = decay; }
+    this.needs = true;
+  }
+
+  // ---- particles -------------------------------------------------------------------------------------------
+  /** Emit pixel particles at a tile. kind: 0 smoke, 1 spark, 2 debris. Speeds in tiles/s. */
+  burst(tile: number, n: number, kind: number, speed: number, rgb: [number, number, number], size = 3, life = 1.5, spread = 0) {
+    const W = this.W, cx = (tile % W) + 0.5, cy = ((tile / W) | 0) + 0.5;
+    const room = 2600 - this.particles.length;
+    n = Math.min(n, room);
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2, v = speed * (0.3 + Math.random() * 0.7);
+      const r0 = spread * Math.sqrt(Math.random());
+      this.particles.push({
+        x: cx + Math.cos(a) * r0, y: cy + Math.sin(a) * r0,
+        vx: Math.cos(a) * v, vy: Math.sin(a) * v - (kind === 0 ? speed * 0.6 : 0),
+        life: 0, max: life * (0.6 + Math.random() * 0.8), size: size * (0.7 + Math.random() * 0.6), grow: kind === 0 ? 1.6 : 0,
+        r: rgb[0], g: rgb[1], b: rgb[2], kind,
+      });
+    }
+    this.needs = true;
+  }
+  private drawParticles(dt: number) {
+    if (!this.particles.length) return;
+    const ctx = this.ctx, z = this.cam.z, zs = clamp(z / 6, 0.6, 3);
+    let w = 0;
+    for (const p of this.particles) {
+      p.life += dt;
+      if (p.life >= p.max) continue;
+      const drag = p.kind === 0 ? 0.985 : 0.95;
+      p.vx *= drag; p.vy *= drag;
+      if (p.kind === 0) p.vy -= 0.4 * dt; // smoke rises
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      this.particles[w++] = p;
+      const t = p.life / p.max;
+      const x = this.sx(p.x), y = this.sy(p.y);
+      if (x < -40 || y < -40 || x > this.cw + 40 || y > this.ch + 40) continue;
+      const s = Math.max(1, Math.round((p.size + p.grow * t * 6) * zs));
+      let r = p.r, g = p.g, b = p.b;
+      if (p.kind === 1) { g = Math.round(g * (1 - t * 0.7)); b = Math.round(b * (1 - t)); }
+      ctx.fillStyle = `rgba(${r},${g},${b},${p.kind === 0 ? (1 - t) * 0.55 : 1 - t * t})`;
+      ctx.fillRect(Math.round(x - s / 2), Math.round(y - s / 2), s, s);
+    }
+    this.particles.length = w;
   }
   tileAt(sx: number, sy: number): number {
     if (!this.W) return -1;
@@ -245,15 +383,45 @@ export class Renderer {
   // ---- effects ------------------------------------------------------------------------------------------
   addFx(f: Omit<Fx, 't0'>) {
     this.fx.push({ ...f, t0: performance.now() });
-    if (f.kind === 'nuke') { this.flash = 1; this.shake = 1; }
+    const x = this.tx(f.tile), y = this.ty(f.tile);
+    const onScreen = x > -150 && y > -150 && x < this.cw + 150 && y < this.ch + 150;
+    const R = f.r;
+    switch (f.kind) {
+      case 'nuke': {
+        const mega = !!f.big;
+        // everyone feels it, wherever they are looking
+        this.flash = Math.max(this.flash, onScreen ? 1 : 0.35);
+        this.shake(mega ? 38 : 24, mega ? 0.978 : 0.967);
+        this.burst(f.tile, mega ? 520 : 280, 0, R * 0.32, [118, 96, 84], 6, mega ? 7 : 5, R * 0.35);
+        this.burst(f.tile, mega ? 320 : 170, 1, R * 1.25, [255, 226, 130], 2, 1.3, R * 0.1);
+        this.burst(f.tile, mega ? 240 : 130, 2, R * 0.9, [58, 46, 40], 3, 2.6, R * 0.2);
+        break;
+      }
+      case 'boom':
+        this.burst(f.tile, 34, 1, R * 2.4, [255, 206, 96], 2, 0.8);
+        this.burst(f.tile, 16, 0, R * 0.5, [128, 116, 104], 4, 1.8, R * 0.3);
+        if (onScreen) this.shake(5, 0.88);
+        break;
+      case 'found': {
+        const rgb = f.color ? hexRgb(f.color) : [255, 210, 63] as [number, number, number];
+        this.burst(f.tile, 140, 1, 5, rgb, 2, 1.4);
+        this.burst(f.tile, 90, 1, 3.5, [255, 236, 170], 2, 1.1);
+        this.burst(f.tile, 110, 0, 1.4, [150, 140, 132], 6, 3.2, 1.2);
+        this.burst(f.tile, 40, 2, 3, [70, 60, 52], 2, 1.6);
+        this.flash = Math.max(this.flash, 0.35);
+        break;
+      }
+    }
     this.needs = true;
   }
 
   // ---- frame ----------------------------------------------------------------------------------------------
   private animating(): boolean {
     const w = this.world;
-    return this.fx.length > 0 || w.flights.size > 0 || w.nukes.size > 0 || this.flash > 0 || this.shake > 0 ||
-      (w.ships.size > 0 && performance.now() - w.tickAt < TICK_MS * 1.2) || !!this.mode || w.phase === 'spawn';
+    return this.fx.length > 0 || w.flights.size > 0 || w.nukes.size > 0 || this.flash > 0 || this.shakeAmp > 0 ||
+      this.particles.length > 0 || !!this.camAnim || !!this.follow || Math.abs(this.cine - (this.cineOn ? 1 : 0)) > 0.01 ||
+      (w.ships.size > 0 && performance.now() - w.tickAt < TICK_MS * 1.2) || !!this.mode || w.phase === 'spawn' ||
+      (this.showOps && w.ops.size > 0);
   }
 
   private frame(now: number) {
@@ -261,15 +429,21 @@ export class Renderer {
     if (!this.needs && !this.animating()) return;
     // cap to ~40fps when only ambient animation is running (saves tablet battery)
     if (!this.needs && now - this.lastFrame < 24) return;
+    const dt = Math.min(0.1, (now - (this.lastFrame || now)) / 1000);
     this.lastFrame = now;
     this.needs = false;
+    this.updateCamera(now, dt);
     const ctx = this.ctx, dpr = this.dpr;
     for (const c of this.chunks) if (c.dirty) { c.ctx.putImageData(c.img, 0, 0); c.dirty = false; }
 
     // map layer in device pixels (integer-aligned chunks => no seams)
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     let shx = 0, shy = 0;
-    if (this.shake > 0) { shx = (Math.random() - 0.5) * 14 * this.shake * dpr; shy = (Math.random() - 0.5) * 14 * this.shake * dpr; this.shake = Math.max(0, this.shake - 0.02); }
+    if (this.shakeAmp > 0.4) {
+      shx = Math.round((Math.random() - 0.5) * 2 * this.shakeAmp * dpr);
+      shy = Math.round((Math.random() - 0.5) * 2 * this.shakeAmp * dpr);
+      this.shakeAmp *= this.shakeDecay ** (dt * 60); // decay is per 60fps frame
+    } else this.shakeAmp = 0;
     ctx.fillStyle = OCEAN_CSS;
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
     ctx.imageSmoothingEnabled = false;
@@ -290,20 +464,84 @@ export class Renderer {
     // overlays in css pixels
     ctx.setTransform(dpr, 0, 0, dpr, shx, shy);
     this.drawModeUnder();
+    if (this.showOps || this.opFocus) this.drawOps();
     this.drawBuildings();
     this.drawShips();
     this.drawFlights();
     this.drawFx(now);
-    if (this.showLabels) this.drawLabels();
+    this.drawParticles(dt);
+    if (this.showLabels && !this.cineOn) this.drawLabels();
     this.drawSelection();
     if (this.flash > 0) {
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.fillStyle = `rgba(255,255,240,${this.flash * 0.85})`;
       ctx.fillRect(0, 0, cwD, chD);
-      this.flash = Math.max(0, this.flash - 0.035);
+      this.flash = Math.max(0, this.flash - dt * 1.8);
     }
+    this.drawLetterbox(dt);
     this.drawMinimap(now);
     this.onFrame();
+  }
+
+  private drawLetterbox(dt: number) {
+    this.cine += ((this.cineOn ? 1 : 0) - this.cine) * Math.min(1, dt * 7);
+    if (this.cine < 0.01) { this.cine = 0; return; }
+    const ctx = this.ctx, bar = Math.round(this.ch * 0.12 * this.cine);
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, this.cw, bar);
+    ctx.fillRect(0, this.ch - bar, this.cw, bar);
+    if (this.cineText && this.cine > 0.6) {
+      ctx.globalAlpha = (this.cine - 0.6) / 0.4;
+      this.text(this.cineText, this.cw / 2, this.ch - bar / 2, 12, '#ffd23f');
+      this.text('TAP TO SKIP', this.cw / 2, bar / 2, 8, '#8d97bd');
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  /** Operation plans on the map: an arrow from each executor to its target with the step number. */
+  private drawOps() {
+    const w = this.world, ctx = this.ctx, W = this.W;
+    const blink = Math.floor(performance.now() / 300) % 2 === 0;
+    for (const op of w.ops.values()) {
+      if (op.status === 'cancelled' || (this.opFocus && op.id !== this.opFocus) || (!this.opFocus && op.status === 'done')) continue;
+      const ordered = op.steps.slice().sort((a, b) => a.delay - b.delay || a.id - b.id);
+      ordered.forEach((st, i) => {
+        const p = w.P(st.by);
+        const col = p ? cssColor(p.color) : '#fff';
+        const tx = this.tx(st.tile), ty = this.ty(st.tile);
+        if (p && p.capital >= 0 && st.kind !== 'fleet') {
+          let ax = (p.capital % W) + 0.5;
+          const bx = (st.tile % W) + 0.5;
+          if (bx - ax > W / 2) ax += W; else if (ax - bx > W / 2) ax -= W;
+          const sx = this.sx(ax), sy = this.sy(((p.capital / W) | 0) + 0.5);
+          ctx.strokeStyle = col;
+          ctx.globalAlpha = st.state === 'planned' ? 0.75 : 0.35;
+          ctx.lineWidth = 2;
+          ctx.setLineDash(st.kind === 'attack' || st.kind === 'invade' ? [8, 5] : [3, 4]);
+          ctx.beginPath();
+          const mx = (sx + tx) / 2, my = (sy + ty) / 2 - Math.hypot(tx - sx, ty - sy) * (st.kind === 'attack' ? 0.08 : 0.22);
+          ctx.moveTo(sx, sy);
+          ctx.quadraticCurveTo(mx, my, tx, ty);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.globalAlpha = 1;
+        }
+        // target marker
+        const live = op.status === 'countdown' || op.status === 'running';
+        const r = 9 + (live && st.state === 'planned' && blink ? 3 : 0);
+        ctx.strokeStyle = st.state === 'failed' ? '#ff4d5e' : st.state === 'done' ? '#5dff8a' : col;
+        ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(tx, ty, r, 0, Math.PI * 2); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(tx - r - 4, ty); ctx.lineTo(tx - r + 3, ty); ctx.moveTo(tx + r - 3, ty); ctx.lineTo(tx + r + 4, ty); ctx.stroke();
+        const g = glyphCanvas(OP_KIND_GLYPH[st.kind] ?? 'target', st.kind === 'mega' || st.kind === 'nuke' ? '#9dff3c' : '#fff', 1);
+        ctx.fillStyle = '#05070c';
+        ctx.fillRect(Math.round(tx + r - 2), Math.round(ty - r - 12), 24, 12);
+        ctx.drawImage(g, Math.round(tx + r), Math.round(ty - r - 10), 8, 8);
+        this.text(String(i + 1), tx + r + 16, ty - r - 6, 8, st.state === 'failed' ? '#ff4d5e' : st.state === 'done' ? '#5dff8a' : '#ffd23f');
+        if (st.delay && op.status !== 'done') this.text(`+${st.delay}s`, tx, ty + r + 9, 7, '#e8ecff');
+      });
+    }
   }
 
   private drawBuildings() {
@@ -388,7 +626,7 @@ export class Renderer {
     }
   }
 
-  private flightPos(f: { from: number; to: number; t0: number; t1: number; kind: number }, t: number) {
+  flightPos(f: { from: number; to: number; t0: number; t1: number; kind: number }, t: number) {
     const W = this.W;
     const ax = (f.from % W) + 0.5, ay = ((f.from / W) | 0) + 0.5;
     let bx = (f.to % W) + 0.5;
@@ -422,7 +660,7 @@ export class Renderer {
       const pos = this.flightPos(f, t);
       // trail
       const steps = 14, p0 = Math.max(0, pos.p - (f.kind === 1 ? 0.5 : 0.3));
-      ctx.lineWidth = f.kind === 1 ? 3 : 2;
+      ctx.lineWidth = f.kind === 1 ? (f.tier === 1 ? 6 : 3) : 2;
       let px = 0, py = 0;
       for (let i = 0; i <= steps; i++) {
         const q = p0 + ((pos.p - p0) * i) / steps;
@@ -437,11 +675,13 @@ export class Renderer {
       }
       const x = this.sx(pos.x), y = this.sy(pos.y);
       if (f.kind === 1) {
+        const mega = f.tier === 1, hs = mega ? 7 : 4;
         ctx.fillStyle = blink ? '#ff2a2a' : '#ffd23f';
-        ctx.fillRect(Math.round(x) - 4, Math.round(y) - 4, 8, 8);
+        ctx.fillRect(Math.round(x) - hs, Math.round(y) - hs, hs * 2, hs * 2);
+        if (mega) { ctx.fillStyle = '#9dff3c'; ctx.fillRect(Math.round(x) - 2, Math.round(y) - 2, 4, 4); }
         // target zone with countdown
         const tx = this.tx(f.to), ty = this.ty(f.to);
-        const R = NUKE.radius * w.map.ms * z;
+        const R = NUKE_TIERS[f.tier ?? 0].radius * w.map.ms * z;
         ctx.strokeStyle = blink ? 'rgba(255,40,40,.95)' : 'rgba(255,200,40,.7)';
         ctx.lineWidth = 2;
         ctx.setLineDash([6, 4]);
@@ -480,23 +720,51 @@ export class Renderer {
           break;
         }
         case 'nuke': {
-          const R = Math.max(14, f.r * z);
-          const fire = t < 0.5 ? t / 0.5 : 1;
-          const grd = ctx.createRadialGradient(x, y, 0, x, y, R * (0.3 + fire * 0.9));
-          grd.addColorStop(0, `rgba(255,255,230,${1 - t})`);
-          grd.addColorStop(0.4, `rgba(255,190,60,${(1 - t) * 0.9})`);
-          grd.addColorStop(1, 'rgba(160,40,20,0)');
+          const R = Math.max(18, f.r * z), mega = !!f.big;
+          // scorched ground covering the whole blast radius, glowing then cooling
+          ctx.fillStyle = `rgba(${Math.round(90 - 60 * t)},${Math.round(30 - 20 * t)},10,${0.55 * (1 - t)})`;
+          ctx.beginPath(); ctx.arc(x, y, R, 0, Math.PI * 2); ctx.fill();
+          // fireball swelling out to the full impact zone
+          const fire = Math.min(1, t / 0.3);
+          const fr = R * (0.2 + fire * 0.85);
+          const grd = ctx.createRadialGradient(x, y, 0, x, y, fr);
+          grd.addColorStop(0, `rgba(255,255,235,${Math.max(0, 1 - t * 1.3)})`);
+          grd.addColorStop(0.35, `rgba(255,200,70,${Math.max(0, 0.95 - t * 1.1)})`);
+          grd.addColorStop(0.75, `rgba(220,70,25,${Math.max(0, 0.7 - t)})`);
+          grd.addColorStop(1, 'rgba(120,20,10,0)');
           ctx.fillStyle = grd;
-          ctx.beginPath(); ctx.arc(x, y, R * (0.3 + fire * 0.9), 0, Math.PI * 2); ctx.fill();
-          ctx.strokeStyle = `rgba(255,255,255,${(1 - t) * 0.8})`;
-          ctx.lineWidth = 3;
-          ctx.beginPath(); ctx.arc(x, y, R * (0.5 + t * 2.6), 0, Math.PI * 2); ctx.stroke();
-          // mushroom column
-          const hgt = R * 1.6 * Math.min(1, t * 2);
-          ctx.fillStyle = `rgba(90,70,60,${(1 - t) * 0.7})`;
-          ctx.fillRect(x - R * 0.12, y - hgt, R * 0.24, hgt);
-          ctx.fillStyle = `rgba(120,90,70,${(1 - t) * 0.75})`;
-          ctx.beginPath(); ctx.ellipse(x, y - hgt, R * 0.55 * Math.min(1, t * 2.5), R * 0.3 * Math.min(1, t * 2.5), 0, 0, Math.PI * 2); ctx.fill();
+          ctx.beginPath(); ctx.arc(x, y, fr, 0, Math.PI * 2); ctx.fill();
+          // shockwaves racing outward
+          for (const [speed, a0, lw] of mega ? [[3.4, 0.9, 5], [5, 0.5, 3], [6.5, 0.3, 2]] : [[3, 0.85, 4], [4.2, 0.4, 2]]) {
+            ctx.strokeStyle = `rgba(255,255,255,${Math.max(0, (1 - t) * a0)})`;
+            ctx.lineWidth = lw;
+            ctx.beginPath(); ctx.arc(x, y, R * (0.4 + t * speed), 0, Math.PI * 2); ctx.stroke();
+          }
+          // mushroom cloud rising from the blast
+          const rise = Math.min(1, t * 1.8), fade = t < 0.6 ? 1 : 1 - (t - 0.6) / 0.4;
+          const hgt = R * (mega ? 1.9 : 1.6) * rise;
+          ctx.fillStyle = `rgba(92,72,62,${0.75 * fade})`;
+          ctx.fillRect(x - R * 0.13, y - hgt, R * 0.26, hgt);
+          ctx.fillStyle = `rgba(128,96,76,${0.8 * fade})`;
+          ctx.beginPath(); ctx.ellipse(x, y - hgt, R * 0.6 * rise, R * 0.33 * rise, 0, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = `rgba(255,170,80,${0.35 * fade * (1 - rise * 0.6)})`;
+          ctx.beginPath(); ctx.ellipse(x, y - hgt + R * 0.08, R * 0.4 * rise, R * 0.16 * rise, 0, 0, Math.PI * 2); ctx.fill();
+          break;
+        }
+        case 'found': {
+          const col = f.color ?? '#ffd23f';
+          ctx.strokeStyle = col;
+          ctx.globalAlpha = 1 - t;
+          ctx.lineWidth = 4;
+          ctx.beginPath(); ctx.arc(x, y, 12 + t * 140, 0, Math.PI * 2); ctx.stroke();
+          ctx.lineWidth = 2;
+          ctx.beginPath(); ctx.arc(x, y, 6 + t * 80, 0, Math.PI * 2); ctx.stroke();
+          ctx.globalAlpha = 1;
+          const fb = Math.max(0, 1 - t * 3);
+          if (fb > 0) {
+            ctx.fillStyle = `rgba(255,240,190,${fb})`;
+            ctx.beginPath(); ctx.arc(x, y, 30 * (1 - fb) + 8, 0, Math.PI * 2); ctx.fill();
+          }
           break;
         }
         case 'intercept': {
@@ -618,7 +886,7 @@ export class Renderer {
       for (const b of w.bld.values()) if (b.owner === w.myId && b.type === B.AIRBASE && b.level > 0) this.circle(b.tile, AIR.bomberRange * ms, 'rgba(220,220,255,.8)', 'rgba(220,220,255,.05)');
     }
     if (focus < 0) return;
-    if (this.mode === 'nuke') this.circle(focus, NUKE.radius * ms, 'rgba(255,40,40,.95)', 'rgba(255,40,40,.15)', false);
+    if (this.mode === 'nuke') this.circle(focus, NUKE_TIERS[this.modeArg === 1 ? 1 : 0].radius * ms, 'rgba(255,40,40,.95)', 'rgba(255,40,40,.15)', false);
     else if (this.mode === 'missile') this.circle(focus, MISSILE.radius * ms, 'rgba(255,160,60,.95)', 'rgba(255,160,60,.2)', false);
     else if (this.mode === 'bomb') this.circle(focus, AIR.bombRadius * ms, 'rgba(255,255,255,.95)', 'rgba(255,255,255,.2)', false);
     else if (this.mode === 'build') {

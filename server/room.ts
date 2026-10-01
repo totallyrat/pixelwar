@@ -9,6 +9,7 @@ import { computeVision } from './sim/vision.ts';
 import { bpack } from './sim/buildings.ts';
 import { fpack } from './sim/units.ts';
 import { effTroops } from './sim/combat.ts';
+import { opsFor } from './sim/ops.ts';
 import {
   MSG, Writer, rleEncode, encodeTileChanges, sanitizeSettings, DEFAULT_SETTINGS, type MatchSettings,
 } from '../shared/protocol.ts';
@@ -232,7 +233,7 @@ export class Room {
       const r = s.rel[base + j];
       if (r) rels.push([j, r, s.napUntil.get(Math.min(pid, j) * L.maxPlayers + Math.max(pid, j)) ?? 0]);
     }
-    const nukes = s.flights.filter((f) => f.kind === 'nuke' && !f.dead).map((f) => ({ id: f.id, o: f.owner, tile: f.to, target: s.owner[f.to], t1: f.t1 }));
+    const nukes = s.flights.filter((f) => f.kind === 'nuke' && !f.dead).map((f) => ({ id: f.id, o: f.owner, tile: f.to, target: s.owner[f.to], t1: f.t1, tier: f.tier ?? 0, from: f.from, t0: f.t0 }));
     const meta = {
       you: pid, tick: s.tick, phase: s.phase, phaseEnd: s.phaseEnd, peaceUntil: s.peaceUntil, startTick: s.startTick,
       settings: s.settings, mapW: g.map.W, blockSize: VISION.block,
@@ -241,6 +242,7 @@ export class Room {
       fallout: s.falloutList.map((t) => [t, s.fallout[t]]),
       proposals: s.proposals.filter((p) => p.to === pid).map((p) => ({ from: p.from, kind: p.kind })),
       chat: s.chat.slice(-40), winter: s.winter, winner: s.winner, me: g.privateView(me),
+      ops: opsFor(g, pid),
     };
     const w = new Writer(1 << 18);
     w.u8(MSG.INIT);

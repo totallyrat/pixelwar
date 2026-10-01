@@ -76,12 +76,24 @@ class Sfx {
     this.burst(big ? 1.2 : 0.6, big ? 0.9 : 0.6, 1400, 60);
     this.tone('sine', big ? 120 : 160, 30, big ? 0.9 : 0.4, 0.6);
   }
-  nuke() {
+  nuke(mega = false) {
     if (!this.ok('nuke', 500)) return;
     this.tone('sine', 70, 22, 3.2, 0.9);
     this.burst(4, 1, 2500, 40);
     this.burst(2.5, 0.6, 400, 50, 'lowpass', 0.5);
     this.tone('sawtooth', 55, 30, 2.5, 0.25, 0.1);
+    if (mega) {
+      // second, deeper wave rolling in after the flash
+      this.tone('sine', 48, 16, 5, 1, 0.35);
+      this.burst(6, 0.9, 900, 25, 'lowpass', 0.6);
+      this.tone('square', 36, 22, 3.5, 0.18, 0.9);
+    }
+  }
+  founded() {
+    if (!this.ok('founded', 1000)) return;
+    this.burst(0.9, 0.5, 1600, 80);
+    this.tone('sine', 140, 40, 0.8, 0.5);
+    [392, 523, 659, 784, 1047].forEach((f, i) => this.tone('square', f, f, 0.14, 0.11, 0.35 + i * 0.09));
   }
   siren() {
     if (!this.ok('siren', 4000)) return;

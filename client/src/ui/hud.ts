@@ -1,7 +1,8 @@
 // In-game HUD (DOM overlay).
 
 import {
-  BUILDINGS, BUILDING_COUNT, B, UNITS, U, UNIT_COUNT, TECH, TERRAIN, RES, TICK_RATE, buildCost, type Cost, AI_LEVELS,
+  BUILDINGS, BUILDING_COUNT, B, UNITS, U, UNIT_COUNT, TECH, TERRAIN, RES, TICK_RATE, NUKE_TIERS, BUILDING_SPACING,
+  buildCost, buildTime, unitCost, type Cost, AI_LEVELS,
 } from '../../../shared/balance.ts';
 import { REL, REL_NAMES } from '../../../shared/protocol.ts';
 import type { App } from '../main.ts';
@@ -9,11 +10,22 @@ import { icon, iconImg, BUILDING_GLYPH, UNIT_GLYPH, cssColor } from '../render/s
 import { fmt, fmtRate, esc, el, mmss, clamp } from '../util.ts';
 import { sfx } from '../audio.ts';
 import { store } from '../net.ts';
+import { QuickMenu, type QItem } from './quickmenu.ts';
+import { OpsView, OP_KIND_NAMES } from './opsview.ts';
 
-type PanelName = 'build' | 'army' | 'diplo' | 'chat' | 'ranks';
+type PanelName = 'build' | 'army' | 'ops' | 'diplo' | 'chat' | 'ranks';
 const PING_KINDS: [string, string, string][] = [['attack', 'Attack here', '#ff4d5e'], ['defend', 'Defend here', '#5aa9ff'], ['look', 'Look here', '#ffd23f'], ['help', 'Need help', '#5dff8a']];
 
-function costHtml(c: Cost, me: any): string {
+/** Short single-resource price tag for compact buttons (the scarcest resource wins). */
+export function shortCost(c: Cost, me: any): string {
+  const miss = (v?: number, have = 0) => !!v && have + 1e-6 < v;
+  if (miss(c.uranium, me?.ura)) return `<span class="no">U${fmt(c.uranium!)}</span>`;
+  if (miss(c.oil, me?.oil)) return `<span class="no">oil ${fmt(c.oil!)}</span>`;
+  if (miss(c.prod, me?.prod)) return `<span class="no">P${fmt(c.prod!)}</span>`;
+  return `<span class="${miss(c.money, me?.money) ? 'no' : ''}">$${fmt(c.money ?? 0)}</span>`;
+}
+
+export function costHtml(c: Cost, me: any): string {
   const parts: string[] = [];
   const f = (v: number | undefined, have: number, ic: string, col: string) => {
     if (!v) return;
@@ -25,14 +37,17 @@ function costHtml(c: Cost, me: any): string {
   f(c.uranium, me?.ura ?? 0, 'uranium', '#9dff3c');
   return parts.join(' ') || 'free';
 }
-function affordable(c: Cost, me: any): boolean {
+export function affordable(c: Cost, me: any): boolean {
   if (!me) return false;
   return (c.money ?? 0) <= me.money + 1e-6 && (c.prod ?? 0) <= me.prod + 1e-6 && (c.oil ?? 0) <= me.oil + 1e-6 && (c.uranium ?? 0) <= me.ura + 1e-6;
 }
 
 export class Hud {
   private root: HTMLElement;
-  private app: App;
+  readonly app: App;
+  readonly qm: QuickMenu;
+  readonly ops: OpsView;
+  private cineNuke = 0;
   private top!: HTMLElement;
   private resEls: Record<string, { v: HTMLElement; r?: HTMLElement; box: HTMLElement }> = {};
   private phaseEl!: HTMLElement;
@@ -93,6 +108,9 @@ export class Hud {
   constructor(app: App) {
     this.app = app;
     this.root = document.getElementById('ui')!;
+    this.qm = new QuickMenu(this.root);
+    this.qm.onError = (msg) => this.toast(esc(msg), 'bad', -1, 'qm:' + msg, 2500);
+    this.ops = new OpsView(this);
   }
 
   get w() { return this.app.world; }
@@ -138,6 +156,7 @@ export class Hud {
     };
     btn('build', 'build', 'Build', () => this.toggle('build'));
     btn('army', 'troops', 'Army', () => this.toggle('army'));
+    btn('ops', 'target', 'Ops', () => this.toggle('ops'));
     btn('diplo', 'diplo', 'Diplo', () => this.toggle('diplo'));
     btn('chat', 'chat', 'Chat', () => this.toggle('chat'));
     btn('ranks', 'score', 'Ranks', () => this.toggle('ranks'));
@@ -165,6 +184,7 @@ export class Hud {
     this.minimap.addEventListener('pointerdown', (e) => this.mmClick(e));
     this.minimap.addEventListener('pointermove', (e) => { if (e.buttons) this.mmClick(e); });
     this.r.minimap = this.minimap;
+    this.r.onCineChange = (on) => this.root.classList.toggle('cine', on);
     this.conn = el('div', 'conn pix hidden', 'RECONNECTING...');
     this.spectate = el('div', 'spectate pix hidden', 'ELIMINATED - SPECTATING');
     this.guard(this.panel);
@@ -179,10 +199,12 @@ export class Hud {
   }
 
   unmount() {
+    this.qm?.close();
     this.root.innerHTML = '';
+    this.root.classList.remove('cine');
     this.overlay = null;
     this.open = null;
-    if (this.r) this.r.minimap = null;
+    if (this.r) { this.r.minimap = null; this.r.showOps = false; this.r.opFocus = 0; }
   }
 
   setConn(ok: boolean) { this.conn?.classList.toggle('hidden', ok); }
@@ -228,6 +250,13 @@ export class Hud {
     // badges
     this.badge('chat', this.unread);
     this.badge('diplo', w.proposals.length);
+    this.badge('ops', this.ops.pendingInvites());
+    this.r.showOps = this.open === 'ops';
+    this.r.opFocus = this.open === 'ops' ? this.ops.view : 0;
+    if (this.cineNuke && this.r.cineOn) {
+      const n = w.nukes.get(this.cineNuke);
+      this.r.cineText = n ? `${NUKE_TIERS[n.tier].name.toUpperCase()} · IMPACT IN ${w.secondsLeft(n.t1).toFixed(1)}s` : 'DETONATION';
+    }
     // death
     if (this.wasAlive && !me.alive && w.phase !== 'spawn') {
       this.wasAlive = false;
@@ -276,16 +305,17 @@ export class Hud {
     if (this.open) this.renderPanel(true);
   }
 
-  private renderPanel(reset = false) {
+  renderPanel(reset = false) {
     this.lastPanel = performance.now();
     const body = this.panelBody, scroll = body.scrollTop;
-    const titles: Record<PanelName, string> = { build: 'Build', army: 'Army & Weapons', diplo: 'Diplomacy', chat: 'Chat', ranks: 'Leaderboard' };
+    const titles: Record<PanelName, string> = { build: 'Build', army: 'Army & Weapons', ops: 'Operations', diplo: 'Diplomacy', chat: 'Chat', ranks: 'Leaderboard' };
     if (!this.open) return;
     this.panelTitle.textContent = titles[this.open];
     let html = '';
     switch (this.open) {
       case 'build': html = this.buildHtml(); break;
       case 'army': html = this.armyHtml(); break;
+      case 'ops': html = this.ops.html(); break;
       case 'diplo': html = this.diploHtml(); break;
       case 'chat': this.renderChat(); return;
       case 'ranks': html = this.ranksHtml(); break;
@@ -308,11 +338,11 @@ export class Hud {
     for (let t = 1; t < BUILDING_COUNT; t++) {
       const d = BUILDINGS[t];
       if (t === B.NUCLEAR_FACILITY && !w.settings.nukes) continue;
-      const c = buildCost(t, 0);
+      const c = buildCost(t, 0, me.nb[t]);
       const ok = affordable(c, me);
       h += `<button class="btn bbtn ${this.r.mode === 'build' && this.r.modeArg === t ? 'on' : ''}" data-act="bmode" data-b="${t}" ${ok ? '' : 'style="opacity:.6"'}>
         <span class="nm">${iconImg(BUILDING_GLYPH[t], '#fff')}${d.name}</span>
-        <span class="cost">${costHtml(c, me)} · ${d.time}s</span>
+        <span class="cost">${costHtml(c, me)} · ${d.time}s${me.nb[t] ? ` <span class="muted">(+${Math.round(d.scale * 100)}% each)</span>` : ''}</span>
         <span class="cost">${d.desc}</span>
         ${me.nb[t] ? `<span class="cnt">owned: ${me.nb[t]}</span>` : ''}</button>`;
     }
@@ -335,22 +365,27 @@ export class Hud {
     h += `<div class="section">PRODUCTION</div>`;
     for (let u = 0; u < UNIT_COUNT; u++) {
       const d = UNITS[u];
-      if (u === U.NUKE && !w.settings.nukes) continue;
-      const has = me.nb[d.building] > 0;
+      const warhead = u === U.NUKE || u === U.MEGA_NUKE;
+      if (warhead && !w.settings.nukes) continue;
+      const lvlOk = !d.minLevel || (me.nfl ?? 0) >= d.minLevel;
+      const has = me.nb[d.building] > 0 && lvlOk;
+      const c = unitCost(u, (me.stock[u] ?? 0) + (me.queue[u] ?? 0));
       const q = me.queue[u], prog = q ? clamp(me.qprog[u] / d.time, 0, 1) : 0;
       const stock = u === U.TANK ? me.tanks : u === U.WARSHIP ? me.ships : me.stock[u];
-      h += `<div class="urow"><img class="ico big" src="${icon(UNIT_GLYPH[u], u === U.NUKE ? '#9dff3c' : '#fff')}" alt="">
+      const need = me.nb[d.building] > 0 ? `Needs a Lv ${d.minLevel} ${BUILDINGS[d.building].name}` : 'Needs ' + BUILDINGS[d.building].name;
+      h += `<div class="urow"><img class="ico big" src="${icon(UNIT_GLYPH[u], warhead ? (u === U.MEGA_NUKE ? '#ff4d5e' : '#9dff3c') : '#fff')}" alt="">
         <div><div class="nm">${d.name} <span class="hi-t">x${fmt(stock)}</span>${q ? ` <span class="muted">+${q} queued</span>` : ''}</div>
-        <div class="sub">${has ? costHtml(d.cost, me) + ' · ' + d.time + 's' : 'Needs ' + BUILDINGS[d.building].name}</div>
+        <div class="sub">${has ? costHtml(c, me) + ' · ' + d.time + 's' : need}</div>
         ${q ? `<div class="bar"><i style="width:${(prog * 100).toFixed(0)}%"></i></div>` : ''}</div>
         <div class="btns">${q ? `<button class="btn small" data-act="untrain" data-u="${u}">-</button>` : ''}
-        <button class="btn small" data-act="train" data-u="${u}" data-n="1" ${has && affordable(d.cost, me) ? '' : 'disabled'}>+1</button>
-        ${u === U.TANK || u === U.MISSILE || u === U.TRANSPORT ? `<button class="btn small" data-act="train" data-u="${u}" data-n="5" ${has && affordable(d.cost, me) ? '' : 'disabled'}>+5</button>` : ''}</div></div>`;
+        <button class="btn small" data-act="train" data-u="${u}" data-n="1" ${has && affordable(c, me) ? '' : 'disabled'}>+1</button>
+        ${u === U.TANK || u === U.MISSILE || u === U.TRANSPORT ? `<button class="btn small" data-act="train" data-u="${u}" data-n="5" ${has && affordable(c, me) ? '' : 'disabled'}>+5</button>` : ''}</div></div>`;
     }
     h += `<div class="section">STRATEGIC ORDERS</div><div class="strat">
       <button class="btn" data-act="mode" data-m="missile" ${me.stock[U.MISSILE] ? '' : 'disabled'}>${iconImg('missile')} Missile (${me.stock[U.MISSILE]})</button>
       <button class="btn" data-act="mode" data-m="bomb" ${me.stock[U.BOMBER] ? '' : 'disabled'}>${iconImg('bomber')} Bomber (${me.stock[U.BOMBER]})</button>
-      ${w.settings.nukes ? `<button class="btn red" data-act="mode" data-m="nuke" ${me.stock[U.NUKE] ? '' : 'disabled'}>${iconImg('nuke', '#9dff3c')} Nuke (${me.stock[U.NUKE]})</button>` : ''}
+      ${w.settings.nukes ? `<button class="btn red" data-act="mode" data-m="nuke" data-a="0" ${me.stock[U.NUKE] ? '' : 'disabled'}>${iconImg('nuke', '#9dff3c')} M. Nuke (${me.stock[U.NUKE]})</button>
+        <button class="btn red" data-act="mode" data-m="nuke" data-a="1" ${me.stock[U.MEGA_NUKE] ? '' : 'disabled'}>${iconImg('nuke', '#ff4d5e')} Mega (${me.stock[U.MEGA_NUKE]})</button>` : ''}
       <button class="btn" data-act="mode" data-m="invade" ${me.stock[U.TRANSPORT] ? '' : 'disabled'}>${iconImg('transport')} Invade (${me.stock[U.TRANSPORT]})</button>
       <button class="btn" data-act="mode" data-m="ships" ${me.ships ? '' : 'disabled'}>${iconImg('warship')} Move fleet</button>
       </div>`;
@@ -363,7 +398,7 @@ export class Hud {
     return h;
   }
 
-  private relTag(id: number): string {
+  relTag(id: number): string {
     const w = this.w;
     if (id === w.myId) return '<span class="tag you">YOU</span>';
     const r = w.rel[id];
@@ -515,13 +550,15 @@ export class Hud {
       if (bld.owner === w.myId && me) {
         const up = bld.level < d.maxLevel && !bld.done;
         const c = buildCost(bld.type, bld.level);
-        h += `<div class="acts">${up ? `<button class="btn small" data-act="upgrade" ${affordable(c, me) ? '' : 'disabled'}>Upgrade ${costHtml(c, me)}</button>` : ''}${cap ? '' : '<button class="btn small red" data-act="demolish">Demolish</button>'}</div>`;
+        h += `<div class="acts">${up ? `<button class="btn small" data-act="upgrade" ${affordable(c, me) ? '' : 'disabled'}>Upgrade ${costHtml(c, me)} · ${buildTime(bld.type, bld.level)}s</button>` : ''}${cap ? '' : '<button class="btn small red" data-act="demolish">Demolish</button>'}</div>`;
+        if (up) h += `<div class="muted" style="font-size:7px">Upgrades take half the time of a new ${d.name.toLowerCase()} and don't get pricier as you build more.</div>`;
       }
     }
     // actions
     const mode = this.r.mode;
     if (mode && ['missile', 'nuke', 'bomb', 'invade'].includes(mode) && this.r.target >= 0) {
-      const label = { missile: 'LAUNCH MISSILE', nuke: 'LAUNCH NUKE', bomb: 'SEND BOMBER', invade: `INVADE (${Math.round(this.pct * 100)}% troops)` }[mode as 'missile'];
+      const nukeName = NUKE_TIERS[this.r.modeArg === 1 ? 1 : 0].name.toUpperCase();
+      const label = { missile: 'LAUNCH MISSILE', nuke: `LAUNCH ${nukeName}`, bomb: 'SEND BOMBER', invade: `INVADE (${Math.round(this.pct * 100)}% troops)` }[mode as 'missile'];
       h += `<div class="acts"><button class="btn ${mode === 'nuke' ? 'red' : 'hi'}" data-act="confirm">${label}</button><button class="btn" data-act="cancelmode">Cancel</button></div>`;
     } else if (w.phase === 'running' && me?.alive && !mode) {
       const acts: string[] = [];
@@ -535,7 +572,8 @@ export class Hud {
         if (o && r !== REL.ALLY && r !== REL.NAP) {
           if (me.stock[U.MISSILE] > 0) acts.push(`<button class="btn" data-act="target" data-m="missile">${iconImg('missile')} Missile</button>`);
           if (me.stock[U.BOMBER] > 0) acts.push(`<button class="btn" data-act="target" data-m="bomb">${iconImg('bomber')} Bomb</button>`);
-          if (me.stock[U.NUKE] > 0 && w.settings.nukes) acts.push(`<button class="btn red" data-act="target" data-m="nuke">${iconImg('nuke', '#9dff3c')} Nuke</button>`);
+          if (me.stock[U.NUKE] > 0 && w.settings.nukes) acts.push(`<button class="btn red" data-act="target" data-m="nuke" data-a="0">${iconImg('nuke', '#9dff3c')} Nuke</button>`);
+          if (me.stock[U.MEGA_NUKE] > 0 && w.settings.nukes) acts.push(`<button class="btn red" data-act="target" data-m="nuke" data-a="1">${iconImg('nuke', '#ff4d5e')} Mega</button>`);
         }
         if (o) acts.push(`<button class="btn" data-act="diplowith" data-p="${o}">${iconImg('diplo')} Diplomacy</button>`);
       } else if (me.ships > 0) acts.push(`<button class="btn" data-act="shipshere">${iconImg('warship')} Move fleet here</button>`);
@@ -555,15 +593,18 @@ export class Hud {
     const hints: Record<string, string> = {
       build: `Tap your land to build: ${BUILDINGS[arg]?.name}`,
       missile: 'Tap a target within range of your silos',
-      nuke: 'Tap a target for the warhead. Everyone will see the launch!',
+      nuke: `Tap a target for the ${NUKE_TIERS[arg === 1 ? 1 : 0].name}. Everyone will see the launch!`,
       bomb: 'Tap a target within bomber range',
       invade: 'Tap a coastal tile to invade by sea',
       ships: 'Tap water to move your fleet',
       ping: 'Tap the map to ping your allies',
+      opstep: `Tap the map to add: ${OP_KIND_NAMES[arg] ?? ''} (${this.ops.currentName()})`,
+      optarget: 'Tap the nation your operation is aimed at',
     };
     let extra = '';
     if (mode === 'ping') extra = PING_KINDS.map(([k, label, col], i) => `<button class="btn small ${i === arg ? 'on' : ''}" data-act="pingkind" data-i="${i}" style="color:${col}">${label}</button>`).join('');
-    this.modebar.innerHTML = `<span>${hints[mode] ?? mode}</span>${extra}<button class="btn small hi" data-act="cancelmode">${mode === 'build' ? 'Done' : 'Cancel'}</button>`;
+    const done = mode === 'build' || mode === 'opstep';
+    this.modebar.innerHTML = `<span>${hints[mode] ?? mode}</span>${extra}<button class="btn small hi" data-act="cancelmode">${done ? 'Done' : 'Cancel'}</button>`;
     this.modebar.classList.remove('hidden');
     if (window.innerWidth < 900 && this.open) this.toggle(null);
   }
@@ -571,16 +612,134 @@ export class Hud {
   /** Map tap routed by main. */
   tap(t: number) {
     const w = this.w, r = this.r, net = this.app.net;
+    if (r.cineOn) { r.endCinematic(); return; }
     if (t < 0) return;
-    if (w.phase === 'spawn') { net.act('spawn', { tile: t }); sfx.spawn(); return; }
+    if (w.phase === 'spawn') {
+      net.act('spawn', { tile: t });
+      sfx.spawn();
+      if (w.map.isLand(t)) r.burst(t, 26, 0, 1, [200, 200, 200], 4, 1.2, 0.6);
+      return;
+    }
     switch (r.mode) {
       case 'build': net.act('build', { tile: t, b: r.modeArg }); sfx.build(); return;
       case 'missile': case 'nuke': case 'bomb': case 'invade':
         r.target = t; r.needs = true; this.card.classList.remove('hidden'); this.renderCard(); sfx.click(); return;
       case 'ships': net.act('ships', { tile: t }); sfx.click(); this.setMode(''); return;
       case 'ping': net.act('ping', { tile: t, kind: PING_KINDS[r.modeArg][0] }); this.setMode(''); return;
+      case 'opstep': this.ops.addStepAt(r.modeArg, t); return;
+      case 'optarget': this.ops.pickTargetAt(t); return;
     }
     this.select(t === r.sel ? -1 : t);
+  }
+
+  // ---- quick menu (hold a pixel) ------------------------------------------------------------------------------
+  /** Nearest tile (around `t`) where the building type can go, judged from what this client knows. */
+  siteNear(t: number, type: number): number {
+    const w = this.w, m = w.map, me = w.myId, def = BUILDINGS[type];
+    const gap = Math.max(1, Math.round(BUILDING_SPACING * m.ms));
+    // same spacing rule as the server: no building within `gap` tiles in any direction
+    const clear = (u: number) => {
+      const x0 = u % m.W, y0 = (u / m.W) | 0;
+      for (let dy = -gap; dy <= gap; dy++) {
+        const y = y0 + dy;
+        if (y < 0 || y >= m.H) continue;
+        for (let dx = -gap; dx <= gap; dx++) if (w.bldAt[m.idx(x0 + dx, y)] >= 0) return false;
+      }
+      return true;
+    };
+    let best = -1, bd = Infinity;
+    m.forRadius(t, 9 * Math.max(1, m.ms), (u, d2) => {
+      if (d2 >= bd || w.owner[u] !== me || !m.isLand(u) || w.fallout[u] || w.bldAt[u] >= 0) return;
+      if (def.req === 'oil' && m.resource[u] !== RES.OIL) return;
+      if (def.req === 'uranium' && m.resource[u] !== RES.URANIUM) return;
+      if (def.req === 'coast' && !m.coastal[u]) return;
+      if (clear(u)) { bd = d2; best = u; }
+    });
+    return best;
+  }
+
+  hold(t: number, x: number, y: number) {
+    const w = this.w, m = w.map, me = this.me, net = this.app.net, r = this.r;
+    if (t < 0 || !m || !me) return;
+    if (w.phase === 'spawn' || r.mode) { this.tap(t); return; }
+    if (w.phase !== 'running' || !me.alive) return;
+    const o = w.owner[t];
+    const items: QItem[] = [];
+    let title: string, sub = '';
+    const pctTxt = `${Math.round(this.pct * 100)}%`;
+    if (o === w.myId && m.isLand(t)) {
+      title = 'QUICK BUILD';
+      const bid = w.bldAt[t], bld = bid >= 0 ? w.bld.get(bid) : undefined;
+      if (bld && bld.owner === w.myId && bld.level < BUILDINGS[bld.type].maxLevel && !bld.done) {
+        const c = buildCost(bld.type, bld.level);
+        items.push({ id: 'up', label: `Upgrade ${BUILDINGS[bld.type].name}`, icon: BUILDING_GLYPH[bld.type], tone: 'hi', sub: `${shortCost(c, me)} ${buildTime(bld.type, bld.level)}s`, disabled: !affordable(c, me), why: 'Not enough resources to upgrade', act: () => { net.act('upgrade', { tile: t }); sfx.build(); } });
+      }
+      const quick: number[] = [B.CITY, B.FARM, B.FACTORY, B.BARRACKS, B.BUNKER, B.AIR_DEFENSE];
+      if (m.resource[t] === RES.OIL || this.siteNear(t, B.OIL_WELL) >= 0) quick.push(B.OIL_WELL);
+      else if (this.siteNear(t, B.URANIUM_MINE) >= 0) quick.push(B.URANIUM_MINE);
+      else if (m.coastal[t]) quick.push(B.SHIPYARD);
+      for (const type of quick) {
+        if (items.length >= 7) break;
+        const c = buildCost(type, 0, me.nb[type]);
+        const site = this.siteNear(t, type);
+        const slotless = BUILDINGS[type].slot && me.used >= me.slots;
+        items.push({
+          id: 'b' + type, label: BUILDINGS[type].name, icon: BUILDING_GLYPH[type], sub: shortCost(c, me),
+          disabled: !affordable(c, me) || site < 0 || slotless,
+          why: slotless ? 'No free building slots: build or upgrade cities' : site < 0 ? 'No free spot nearby' : 'Not enough resources',
+          act: () => { net.act('build', { tile: site, b: type }); sfx.build(); },
+        });
+      }
+      items.push({ id: 'more', label: 'More...', icon: 'build', act: () => { this.select(t); if (this.open !== 'build') this.toggle('build'); } });
+    } else if (m.isWater(t)) {
+      title = 'OPEN WATER';
+      items.push({ id: 'fleet', label: 'Move fleet', icon: 'warship', disabled: !me.ships, why: 'You have no warships', act: () => net.act('ships', { tile: t }) });
+      if (this.ops.active()) items.push({ id: 'opfleet', label: 'Op: fleet', icon: 'target', act: () => this.ops.addStepAt(6, t) });
+      items.push({ id: 'ping', label: 'Ping', icon: 'ping', act: () => net.act('ping', { tile: t, kind: 'look' }) });
+    } else {
+      const p = w.P(o), r2 = w.rel[o];
+      const friendly = !!o && (r2 === REL.ALLY || r2 === REL.NAP);
+      title = o ? (p?.name ?? '?') : 'UNCLAIMED LAND';
+      sub = o ? REL_NAMES[r2] + (p?.troops !== null && p?.troops !== undefined ? ` · ${fmt(p.troops)} troops` : '') : m.countryName(t);
+      if (friendly) {
+        items.push({ id: 'dip', label: 'Diplomacy', icon: 'diplo', act: () => this.openDiploWith(o) });
+        if (r2 === REL.ALLY) items.push({ id: 'aid', label: 'Send 10% troops', icon: 'troops', act: () => net.act('donate', { p: o, troops: 0.1 }) });
+        items.push({ id: 'ping', label: 'Ping', icon: 'ping', act: () => net.act('ping', { tile: t, kind: 'look' }) });
+      } else {
+        const attack = (pct: number) => () => { net.act('attack', { tile: t, pct }); sfx.attack(); r.addFx({ kind: 'ping', tile: t, r: 1, dur: 700, color: '#ff4d5e' }); };
+        items.push({ id: 'atk', label: `${o ? 'Attack' : 'Expand'} ${pctTxt}`, icon: 'troops', tone: 'hi', act: attack(this.pct) });
+        items.push({ id: 'atk100', label: o ? 'All-out 100%' : 'Expand 100%', icon: 'troops', iconColor: '#ff8080', act: attack(1) });
+        if (m.coastal[t]) items.push({ id: 'inv', label: `Invade ${pctTxt}`, icon: 'transport', sub: `x${me.stock[U.TRANSPORT]}`, disabled: !me.stock[U.TRANSPORT], why: 'Build transports at a shipyard first', act: () => { net.act('invade', { tile: t, pct: this.pct }); sfx.launch(); } });
+        if (o) {
+          items.push({ id: 'msl', label: 'Missile', icon: 'missile', sub: `x${me.stock[U.MISSILE]}`, disabled: !me.stock[U.MISSILE], why: 'Build missiles at a Missile Silo', act: () => { net.act('missile', { tile: t }); sfx.launch(); } });
+          items.push({ id: 'bomb', label: 'Bomber', icon: 'bomber', sub: `x${me.stock[U.BOMBER]}`, disabled: !me.stock[U.BOMBER], why: 'Build bombers at an Airbase', act: () => { net.act('bomb', { tile: t }); sfx.launch(); } });
+          if (w.settings.nukes && (me.stock[U.NUKE] || me.stock[U.MEGA_NUKE] || me.nb[B.NUCLEAR_FACILITY])) {
+            items.push({ id: 'nuke', label: 'M. Nuke', icon: 'nuke', iconColor: '#9dff3c', tone: 'red', confirm: true, sub: `x${me.stock[U.NUKE]}`, disabled: !me.stock[U.NUKE], why: 'No Medium Nuke ready', act: () => { net.act('nuke', { tile: t, tier: 0 }); sfx.launch(); } });
+            items.push({ id: 'mega', label: 'Mega Nuke', icon: 'nuke', iconColor: '#ff4d5e', tone: 'red', confirm: true, sub: `x${me.stock[U.MEGA_NUKE]}`, disabled: !me.stock[U.MEGA_NUKE], why: 'No Mega Nuke ready (needs a Lv 2 Nuclear Facility)', act: () => { net.act('nuke', { tile: t, tier: 1 }); sfx.launch(); } });
+          }
+          const act = this.ops.active();
+          if (act) items.push({ id: 'opstep', label: 'Add to op', icon: 'target', tone: 'green', sub: esc(act.name.replace('Operation ', '')).slice(0, 12), act: () => this.ops.addStepAt(0, t) });
+          else items.push({ id: 'opnew', label: 'Plan op', icon: 'target', tone: 'green', act: () => this.ops.create(o) });
+          items.push({ id: 'dip', label: 'Diplomacy', icon: 'diplo', act: () => this.openDiploWith(o) });
+        }
+      }
+    }
+    // keep the ring readable: at most 8 buttons, dropping the least important ones
+    while (items.length > 8) {
+      const drop = ['atk100', 'dip', 'bomb', 'ping'].find((id) => items.some((i) => i.id === id));
+      if (!drop) break;
+      items.splice(items.findIndex((i) => i.id === drop), 1);
+    }
+    this.qm.show(x, y, title, sub, items, true);
+    this.r.hover = t;
+    this.r.needs = true;
+  }
+
+  private openDiploWith(pid: number) {
+    this.diploSearch = this.w.name(pid).toLowerCase();
+    if (this.open !== 'diplo') this.toggle('diplo');
+    this.mountDiploExtra();
+    this.renderPanel(true);
   }
   quickAttack(t: number) {
     const w = this.w, net = this.app.net;
@@ -596,6 +755,8 @@ export class Hud {
     this.r.addFx({ kind: 'ping', tile: t, r: 1, dur: 700, color: '#ff4d5e' });
   }
   escape() {
+    if (this.qm.isOpen) { this.qm.close(); return; }
+    if (this.r.cineOn) { this.r.endCinematic(); return; }
     if (this.overlay) { this.closeOverlay(); return; }
     if (this.r.mode) { this.setMode(''); return; }
     if (this.open) { this.toggle(null); return; }
@@ -607,6 +768,7 @@ export class Hud {
     else if (k === 'g') this.toggle('diplo');
     else if (k === 't' || k === 'enter') this.toggle('chat');
     else if (k === 'l') this.toggle('ranks');
+    else if (k === 'o') this.toggle('ops');
     else if (k === 'h' || k === ' ') { const p = this.w.P(this.w.myId); if (p && p.capital >= 0) this.r.centerOn(p.capital); }
     else if (k === 'p') this.setMode('ping', 2);
     else if (/^[1-9]$/.test(k)) { const v = Number(k) * 10; this.pct = v / 100; this.pctLabel.textContent = v + '%'; const inp = this.bottom.querySelector<HTMLInputElement>('.troopctl input'); if (inp) inp.value = String(v); }
@@ -620,6 +782,7 @@ export class Hud {
     const t = r.sel;
     const pid = Number(b.dataset.p ?? 0);
     sfx.click();
+    if (act.startsWith('op') && this.ops.act(act, b)) { if (this.open === 'ops') setTimeout(() => this.renderPanel(), 60); return; }
     switch (act) {
       case 'bmode': {
         const type = Number(b.dataset.b);
@@ -634,12 +797,13 @@ export class Hud {
       case 'attack': net.act('attack', { tile: t, pct: this.pct }); sfx.attack(); break;
       case 'invadehere': net.act('invade', { tile: t, pct: this.pct }); sfx.launch(); break;
       case 'shipshere': net.act('ships', { tile: t }); break;
-      case 'target': this.setMode(b.dataset.m!); r.target = t; this.renderCard(); break;
-      case 'mode': this.setMode(b.dataset.m!); break;
+      case 'target': this.setMode(b.dataset.m!, Number(b.dataset.a ?? 0)); r.target = t; this.renderCard(); break;
+      case 'mode': this.setMode(b.dataset.m!, Number(b.dataset.a ?? 0)); break;
       case 'confirm': {
         const m = r.mode, tile = r.target;
         if (tile < 0) break;
         if (m === 'invade') net.act('invade', { tile, pct: this.pct });
+        else if (m === 'nuke') net.act('nuke', { tile, tier: r.modeArg === 1 ? 1 : 0 });
         else net.act(m, { tile });
         sfx.launch();
         this.setMode('');
@@ -668,9 +832,33 @@ export class Hud {
       }
       case 'locate': { const p = w.P(pid); if (p && p.capital >= 0) { r.centerOn(p.capital); this.select(p.capital); } break; }
       case 'intercept': net.act('intercept', { id: Number(b.dataset.id) }); sfx.launch(); break;
-      case 'view': r.centerOn(Number(b.dataset.t)); break;
+      case 'view': if (b.dataset.id) this.watchNuke(Number(b.dataset.id)); else r.centerOn(Number(b.dataset.t)); break;
     }
     if (this.open && act !== 'bmode') setTimeout(() => this.renderPanel(), 120);
+  }
+
+  /** Cinematic: ride along with a warhead, then hold on the impact until the dust settles. */
+  watchNuke(id: number) {
+    const w = this.w, r = this.r, W = w.W;
+    const n = w.nukes.get(id), f0 = w.flights.get(id);
+    if (!n && !f0) return;
+    const tile = n?.tile ?? f0!.to, tier = n?.tier ?? f0?.tier ?? 0;
+    const R = NUKE_TIERS[tier].radius * w.map.ms;
+    const zFly = tier ? 5 : 8, zImpact = clamp(Math.min(r.cw, r.ch) / (R * 4.2), r.minZoom(), 12);
+    let impactAt = 0;
+    this.cineNuke = id;
+    if (this.open && window.innerWidth < 900) this.toggle(null);
+    r.cinematic(() => {
+      const fl = w.flights.get(id);
+      if (fl) { const p = r.flightPos(fl, w.now()); return { x: p.x, y: p.y, z: zFly }; }
+      if (!impactAt) impactAt = performance.now();
+      if (performance.now() - impactAt > (tier ? 6000 : 4500)) {
+        this.cineNuke = 0;
+        setTimeout(() => r.endCinematic(), 0);
+        return null;
+      }
+      return { x: (tile % W) + 0.5, y: ((tile / W) | 0) + 0.5, z: zImpact };
+    }, `${NUKE_TIERS[tier].name.toUpperCase()} INBOUND`);
   }
 
   // ---- alerts & toasts ------------------------------------------------------------------------------------------
@@ -686,10 +874,10 @@ export class Hud {
       for (const n of w.nukes.values()) {
         const tgt = n.target === w.myId ? '<span class="hi-t">YOU</span>' : n.target ? esc(w.name(n.target)) : 'open land';
         const mine = n.o === w.myId;
-        h += `<div class="alert" data-nuke="${n.id}"><div class="t">${iconImg('nuke', '#ff4d5e')} NUCLEAR LAUNCH by ${esc(w.name(n.o))} → ${tgt}</div>
+        h += `<div class="alert ${n.tier ? 'mega' : ''}" data-nuke="${n.id}"><div class="t">${iconImg('nuke', n.tier ? '#ff4d5e' : '#9dff3c')} ${NUKE_TIERS[n.tier].name.toUpperCase()} by ${esc(w.name(n.o))} → ${tgt}</div>
           <div class="row"><span class="cd grow"></span>
           ${!mine && canIntercept ? `<button class="btn small hi" data-act="intercept" data-id="${n.id}">Intercept</button>` : ''}
-          <button class="btn small" data-act="view" data-t="${n.tile}">View</button></div></div>`;
+          <button class="btn small" data-act="view" data-id="${n.id}" data-t="${n.tile}">View</button></div></div>`;
       }
       this.alerts.innerHTML = h;
     }
@@ -734,18 +922,27 @@ export class Hud {
         break;
       }
       case 'fl': if (e.f[1] === 0 || e.f[1] === 2) { if (w.visible(e.f[3]) || e.f[2] === me) sfx.launch(); } break;
-      case 'nl':
+      case 'nl': {
         sfx.siren();
-        this.toast(`${iconImg('nuke', '#ff4d5e')} ${nm(e.o)} launched a NUKE${e.target ? ' at ' + nm(e.target) : ''}!`, 'bad', e.tile, '', 7000);
+        const T = NUKE_TIERS[e.tier ?? 0];
+        this.toast(`${iconImg('nuke', e.tier ? '#ff4d5e' : '#9dff3c')} ${nm(e.o)} launched a ${T.name.toUpperCase()}${e.target ? ' at ' + nm(e.target) : ''}!`, 'bad', e.tile, '', 8000,
+          `<button class="btn small" data-act="view" data-id="${e.id}" data-t="${e.tile}">View</button>`);
         break;
+      }
       case 'hit':
         if (e.x) { r.addFx({ kind: 'intercept', tile: e.tile, r: 1, dur: 1400 }); if (e.k === 1 || w.visible(e.tile)) sfx.intercept(); }
         else { r.addFx({ kind: 'boom', tile: e.tile, r: e.r ?? 2, dur: 900 }); if (w.visible(e.tile)) sfx.explosion(); }
         break;
-      case 'nuke':
-        r.addFx({ kind: 'nuke', tile: e.tile, r: e.r, dur: 3800 });
-        sfx.nuke();
-        this.toast(`NUCLEAR DETONATION by ${nm(e.by)}`, 'bad', e.tile, '', 6000);
+      case 'nuke': {
+        const mega = e.tier === 1;
+        r.addFx({ kind: 'nuke', tile: e.tile, r: e.r, dur: mega ? 7500 : 5200, big: mega });
+        sfx.nuke(mega);
+        navigator.vibrate?.(mega ? [180, 60, 260, 60, 400] : [120, 50, 220]);
+        this.toast(`${mega ? 'MEGA ' : ''}NUCLEAR DETONATION by ${nm(e.by)}`, 'bad', e.tile, '', 6000);
+        break;
+      }
+      case 'op': case 'opx': case 'opInvite': case 'opAns': case 'opStep': case 'opGo': case 'opMade':
+        this.ops.onEvent(e);
         break;
       case 'ic': this.toast(e.ok ? `Warhead intercepted${e.by ? ' by ' + nm(e.by) : ''}!` : `Interception by ${nm(e.by)} FAILED`, e.ok ? 'good' : 'bad', -1, '', 3500); break;
       case 'elim': {
@@ -782,7 +979,13 @@ export class Hud {
       case 'rebel': if (e.from === me) this.toast('Rebellion! Unhappy provinces declared independence.', 'bad', e.tile, '', 6000); break;
       case 'winter': if (w.settings.nuclearWinter && e.v > 3) this.toast(`Nuclear winter deepens: world food output -${Math.min(60, (e.v - 3) * 10)}%`, 'warn', -1, 'winter'); break;
       case 'unit': this.toast(`${UNITS[e.u].name} ready`, 'good', -1, 'unit' + e.u, 2000); break;
-      case 'phase': if (e.phase === 'running') { this.flashBanner('THE WAR BEGINS', w.peaceUntil > w.tick ? `Peace time: ${Math.round(w.secondsLeft(w.peaceUntil))}s. Expand into unclaimed land!` : 'Expand and conquer!'); sfx.spawn(); } break;
+      case 'phase':
+        if (e.phase === 'running') {
+          const p = w.P(me);
+          if (p && p.capital >= 0) { r.intro(p.capital, p.color); sfx.founded(); }
+          setTimeout(() => this.flashBanner('THE WAR BEGINS', w.peaceUntil > w.tick ? `Peace time: ${Math.round(w.secondsLeft(w.peaceUntil))}s. Expand into unclaimed land!` : 'Expand and conquer!'), p && p.capital >= 0 ? 1600 : 0);
+        }
+        break;
       case 'end': this.showEnd(e); break;
       case 'pl': case 'roster': r.refreshPlayers(); break;
     }
@@ -818,14 +1021,16 @@ export class Hud {
   showHelp() {
     this.showOverlay(`<h2>HOW TO PLAY</h2><div class="help">
       <b>Goal:</b> control ${this.w.settings?.winPercent ?? 70}% of the world's land, be the last human nation (or alliance) standing, or have the top score when time runs out.<br><br>
-      <b>Expand & attack:</b> set the SEND TROOPS slider, then <b>double-tap</b> or <b>long-press</b> (right-click on desktop) any land next to you. Troops advance as a wave. Mountains and forests are slower and harder to take, bunkers make it much harder.<br>
-      <b>Tap</b> a tile to inspect it and see actions. <b>Pinch/scroll</b> to zoom, drag to pan.<br><br>
-      <b>Economy:</b> Farms feed your people (starvation = revolt), Cities raise population, money and building slots, Factories give production. Oil and Uranium need wells/mines on deposits (black and green dots).<br>
+      <b>Hold any pixel</b> to open the quick menu. On your land: Quick Build (placed on the nearest free spot). On other land: attack, invade, missile, bomber, nukes, add to an operation, diplomacy.<br>
+      <b>Expand & attack:</b> set the SEND TROOPS slider, then <b>double-tap</b> any land next to you (right-click on desktop). Troops advance as a wave. Mountains and forests are slower and harder to take, bunkers make it much harder.<br>
+      <b>Tap</b> a tile to inspect it. <b>Pinch/scroll</b> to zoom, drag to pan.<br><br>
+      <b>Economy:</b> Farms feed your people (starvation = revolt), Cities raise population, money and building slots, Factories give production. Oil and Uranium need wells/mines on deposits (black and green dots). Every extra copy of a building costs more, while upgrading one takes half the time of building new.<br>
       <b>Army:</b> Mobilization sets how many people serve. Barracks recruit faster. Tanks don't cost population and crush open terrain.<br>
       <b>Navy:</b> Shipyards build warships and transports. Use transports to invade overseas.<br>
-      <b>Strategic:</b> Silos launch missiles, Air Defense shoots them down. Nukes need a Nuclear Facility, a Silo and uranium. Every launch is broadcast to the whole world, gives a 15s window to intercept, and AI nations will not forgive you.<br><br>
+      <b>Strategic:</b> Silos launch missiles, Air Defense shoots them down. Nuclear Facilities build Medium Nukes; at Lv 2 they build Mega Nukes that erase whole regions. Every launch is broadcast to the world with a 15-20s window to intercept, press VIEW to ride along with the warhead.<br><br>
+      <b>Operations (OPS):</b> plan several attacks and strikes against one nation, fire them all at once or in a timed sequence, and invite allies to add their own forces.<br>
       <b>Diplomacy:</b> pacts (5 min), alliances (shared vision, shared victory), aid, and... betrayal.<br><br>
-      <b>Keys:</b> WASD/arrows pan · +/- zoom · 1-9 troop % · B build · R army · G diplomacy · T chat · L ranks · H home · P ping · Esc cancel
+      <b>Keys:</b> WASD/arrows pan · +/- zoom · 1-9 troop % · B build · R army · O operations · G diplomacy · T chat · L ranks · H home · P ping · Esc cancel
       </div><button class="btn big hi" data-o="close">Got it</button>`);
   }
 
