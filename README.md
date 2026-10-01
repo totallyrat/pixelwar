@@ -9,7 +9,45 @@ Tablet-first (touch + pinch), also great with mouse and keyboard.
 
 ---
 
-## Quick start
+## Quick start: the desktop app (Windows & macOS)
+
+The app contains everything: the game, its server and the Cloudflare tunnel client. Nothing else to install.
+
+| | Install |
+|---|---|
+| **Windows 10/11** | Run **`PIXEL-WAR-Setup-1.0.0.exe`**. It installs in a few seconds (no admin rights needed), adds Start menu and desktop shortcuts and starts the game. The installer is not code-signed, so Windows SmartScreen may say *"Windows protected your PC"*: click **More info → Run anyway**. |
+| **macOS** | Open the `.dmg` (**`mac-arm64`** for Apple Silicon M1–M4, **`mac-x64`** for Intel Macs) and drag **PIXEL WAR** into Applications. The app has no Apple developer ID, so the first time macOS blocks it: open **System Settings → Privacy & Security**, scroll down and click **Open Anyway** (on macOS 14 and older you can also right-click the app → **Open**). After that it opens normally. |
+
+**Hosting online from the app:** the title screen has a **HOST FROM THIS COMPUTER** panel.
+
+- **GO ONLINE** opens a free Cloudflare quick tunnel (no account, no router setup) and, usually about 10 seconds
+  later, shows a public `https://….trycloudflare.com` link. Friends open it in any web browser (PC, Mac, tablet,
+  phone) and play; they don't need the app. The link only appears once Cloudflare has published it, so it works
+  even for whoever opens it right away. **LINK WORKS** means the app reached your game through it.
+- **Create room** and share its invite link, or let people scan the **QR code**. The invite link automatically
+  uses the public address while you're online, and your Wi-Fi address while you're not (people on the same Wi-Fi
+  can always join).
+- **Menu → Invite friends** shows the same panel during a match. Friends can join a running match.
+- **STOP** closes the link. You get a new link each time you go online.
+- Closing the app while friends are connected or while online asks first. Matches are saved and resume the next
+  time you open the app.
+- On Windows, the first launch may show a firewall prompt. Allow **private networks** so devices on your Wi-Fi can
+  join; going online through Cloudflare works either way.
+- Saved matches and the log file live in `%APPDATA%\PIXEL WAR` (Windows) or `~/Library/Application Support/PIXEL WAR`
+  (macOS). **Game → Open log file** in the menu bar (press Alt on Windows) shows it.
+
+**Building the installers** (needs Node.js 22.18+, then `npm install`):
+
+- `npm run dist` builds the installer for the computer you're on: `release/PIXEL-WAR-Setup-1.0.0.exe` on Windows,
+  `release/PIXEL-WAR-1.0.0-mac-arm64.dmg` and `…-mac-x64.dmg` on a Mac. macOS installers can only be built on a Mac.
+- **Both at once, without a Mac:** push the project to GitHub and run the **Desktop installers** workflow
+  (Actions tab → *Run workflow*). It builds and smoke-tests the Windows and Mac apps and attaches the installers to
+  the run. Pushing a tag like `v1.0.1` also publishes them as a GitHub release.
+- `npm run app` runs the desktop app from source. `node tools/desktop-smoke.ts [--packaged] [--tunnel]` launches the
+  app with a throwaway data folder and drives the real window: title screen, hosting panel, going online, a remote
+  player joining through the public link, starting a match, and a clean, saved shutdown.
+
+## Quick start without the app
 
 **Requirements:** Node.js 22.18+ (Node 24 recommended; it runs TypeScript directly).
 
@@ -22,9 +60,9 @@ Tablet-first (touch + pinch), also great with mouse and keyboard.
   People on the same Wi-Fi can use the "network" address it prints (great for tablets).
 - `npm run share` does the same and also opens a free **Cloudflare quick tunnel**: no account,
   no port forwarding. It prints (and on Windows copies) a public `https://….trycloudflare.com`
-  link. If `cloudflared` is missing, it offers to install it with `winget` (Windows) or tells you
-  the one-line install (`brew install cloudflared` on macOS). The link changes on every run.
-- In the game: **Create room** and share the 5-letter code or the **Copy invite link** button.
+  link. If `cloudflared` isn't installed, it downloads Cloudflare's official build once into `dist/vendor/`.
+  The link changes on every run.
+- In the game: **Create room** and share the 5-letter code or the **Copy link** button.
   Friends open the link and land straight in your lobby. **Quick solo** starts a game against AI
   immediately.
 
@@ -85,15 +123,27 @@ T chat · L ranks · H home · P ping · Esc cancel.
 
 ```
 shared/   balance.ts (ALL gameplay numbers), mapdata.ts (map format + geometry), protocol.ts (wire format)
-server/   main.ts (HTTP + WebSocket + persistence), room.ts (lobby, tick loop, per-client diffs)
+server/   server.ts (HTTP + WebSocket + persistence), main.ts (command line), room.ts (lobby, tick loop, per-client diffs)
           sim/  game.ts (tick orchestration, territory, spawning, win), combat.ts (conquest wave),
                 economy.ts, buildings.ts, units.ts (ships/flights/nukes), nav.ts (naval A*),
                 diplomacy.ts, ops.ts (planned & allied operations), vision.ts (fog), ai.ts (AI nations)
 client/   src/ main.ts, net.ts, world.ts (client mirror), input.ts (touch/mouse/keys), audio.ts (synth SFX),
           render/ renderer.ts (chunked canvas, particles, cinematic camera), sprites.ts (pixel glyphs),
-          ui/ hud.ts, quickmenu.ts (hold ring menu), opsview.ts (operations panel), lobby.ts
-tools/    mapgen/ (Natural Earth -> pixel map), start/share/dev launchers, bench.ts, selftest.ts
+          ui/ hud.ts, quickmenu.ts (hold ring menu), opsview.ts (operations panel), lobby.ts, invite.ts (link, QR, Go online)
+          desktop.ts (bridge to the desktop app, absent in browsers)
+desktop/  main.ts (Electron window, menu, quit confirmation), server-entry.ts (game server in a utility process),
+          preload.ts (window.pwDesktop), tunnel.ts (find/download cloudflared, quick tunnel), assets/icon.png
+tools/    mapgen/ (Natural Earth -> pixel map), start/share/dev launchers, desktop.ts (app build + installers),
+          desktop-smoke.ts, make-icon.ts, bench.ts, selftest.ts
 ```
+
+- **Desktop app:** Electron. The game server runs in a background utility process (port 8080, or the next free
+  one) and the window loads it like a browser would, so the app and the website are the same game. The page gets
+  no Node access; a small preload bridge offers only "go online / stop / copy / info", and the main process ignores
+  those calls from any page but the local game. Cloudflare's `cloudflared` is bundled per platform (downloaded from
+  Cloudflare's GitHub releases at build time, with its signature intact) and started as
+  `cloudflared tunnel --url http://127.0.0.1:<port>`. Installers come from electron-builder (`electron-builder.yml`):
+  a one-click per-user NSIS installer on Windows and an ad-hoc signed DMG per architecture on macOS.
 
 - **Map:** Natural Earth 1:50m countries, lakes and geography regions, rasterized with a Miller
   projection cropped to 82°N–61°S (exactly 2:1, no giant Antarctica strip). Terrain: ocean, shallows,

@@ -12,6 +12,7 @@ import { sfx } from '../audio.ts';
 import { store } from '../net.ts';
 import { QuickMenu, type QItem } from './quickmenu.ts';
 import { OpsView, OP_KIND_NAMES } from './opsview.ts';
+import { mountInvite } from './invite.ts';
 
 type PanelName = 'build' | 'army' | 'ops' | 'diplo' | 'chat' | 'ranks';
 const PING_KINDS: [string, string, string][] = [['attack', 'Attack here', '#ff4d5e'], ['defend', 'Defend here', '#5aa9ff'], ['look', 'Look here', '#ffd23f'], ['help', 'Need help', '#5dff8a']];
@@ -1010,6 +1011,7 @@ export class Hud {
 
   showMenu() {
     this.showOverlay(`<h2>MENU</h2>
+      <button class="btn big green" data-o="invite">Invite friends</button>
       <button class="btn big" data-o="sound">Sound: ${sfx.muted ? 'OFF' : 'ON'}</button>
       <button class="btn big" data-o="labels">Nation names: ${this.r.showLabels ? 'ON' : 'OFF'}</button>
       <button class="btn big" data-o="fullscreen">Fullscreen</button>
@@ -1017,6 +1019,16 @@ export class Hud {
       ${this.me?.alive && this.w.phase === 'running' ? '<button class="btn big red" data-o="surrender">Surrender</button>' : ''}
       <button class="btn big red" data-o="leave">Leave match</button>
       <button class="btn big hi" data-o="close">Back to game</button>`);
+  }
+  showInvite() {
+    const code = String(this.app.lobbyInfo?.code ?? '');
+    this.showOverlay(`<h2>INVITE FRIENDS</h2>
+      <div class="row"><span class="muted grow" style="font-size:8px">ROOM CODE</span><span class="roomcode">${esc(code)}</span></div>
+      <div data-invite></div>
+      <div class="muted" style="font-size:8px">Friends who join now start as a new nation in a free spot.</div>
+      <button class="btn big hi" data-o="close">Back to game</button>`);
+    const box = this.overlay?.querySelector<HTMLElement>('[data-invite]');
+    if (box) mountInvite(box, code || null);
   }
   showHelp() {
     this.showOverlay(`<h2>HOW TO PLAY</h2><div class="help">

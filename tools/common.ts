@@ -27,6 +27,6 @@ export function ensureBuilt() {
   }
   if (fs.existsSync(out) && fs.statSync(out).mtimeMs >= src) return;
   console.log('Building the game client...');
-  const r = spawnSync(isWin ? 'npx.cmd' : 'npx', ['vite', 'build', '--logLevel', 'warn'], { cwd: ROOT, stdio: 'inherit', shell: isWin });
+  const r = spawnSync(process.execPath, [path.join(ROOT, 'node_modules/vite/bin/vite.js'), 'build', '--logLevel', 'warn'], { cwd: ROOT, stdio: 'inherit' });
   if (r.status !== 0) { console.error('Client build failed.'); process.exit(1); }
 }

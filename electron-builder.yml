@@ -1,0 +1,48 @@
+# Desktop installers for PIXEL WAR (built by `npm run dist`, see tools/desktop.ts).
+appId: com.pixelwar.game
+productName: PIXEL WAR
+copyright: Map data © Natural Earth (public domain)
+directories:
+  output: release
+  buildResources: desktop/assets
+files:
+  - dist/desktop/**/*
+  - package.json
+extraResources:
+  - from: dist/client            # game client + maps, served by the built-in server
+    to: game
+  - from: dist/vendor/cloudflared/${os}-${arch}   # Cloudflare tunnel client for "Go online"
+    to: cloudflared
+asar: true
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: desktop/assets/icon.png
+nsis:
+  oneClick: true            # double-click, no questions, no admin rights
+  perMachine: false
+  runAfterFinish: true
+  createDesktopShortcut: always
+  createStartMenuShortcut: true
+  shortcutName: PIXEL WAR
+  artifactName: PIXEL-WAR-Setup-${version}.${ext}
+
+mac:
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+  category: public.app-category.strategy-games
+  icon: desktop/assets/icon.png
+  identity: "-"             # ad-hoc signature (no Apple developer account): Gatekeeper asks once, see README
+  hardenedRuntime: false
+  artifactName: PIXEL-WAR-${version}-mac-${arch}.${ext}
+dmg:
+  title: PIXEL WAR
+
+linux:
+  target: [AppImage]
+  category: Game
+  icon: desktop/assets/icon.png
+  artifactName: PIXEL-WAR-${version}-linux-${arch}.${ext}

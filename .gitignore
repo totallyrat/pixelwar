@@ -4,3 +4,4 @@ server/data/
 tools/mapgen/cache/
 *.log
 .DS_Store
+release/

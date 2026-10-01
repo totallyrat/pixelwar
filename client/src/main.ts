@@ -163,6 +163,7 @@ export class App {
       case 'labels': this.renderer.showLabels = !this.renderer.showLabels; this.renderer.needs = true; h.showMenu(); break;
       case 'fullscreen': document.documentElement.requestFullscreen?.().catch(() => {}); h.closeOverlay(); break;
       case 'help': h.showHelp(); break;
+      case 'invite': h.showInvite(); break;
       case 'surrender': if (confirm('Surrender your nation? You will become a spectator.')) { this.net.act('surrender'); h.closeOverlay(); } break;
       case 'leave': if (confirm('Leave this match?')) { h.closeOverlay(); this.net.send({ t: 'leave' }); } break;
       case 'lobby': {

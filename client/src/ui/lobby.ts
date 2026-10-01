@@ -7,6 +7,8 @@ import { cssColor, iconImg } from '../render/sprites.ts';
 import { esc, el } from '../util.ts';
 import { sfx } from '../audio.ts';
 import { store } from '../net.ts';
+import { desktop } from '../desktop.ts';
+import { mountInvite } from './invite.ts';
 
 export class Lobby {
   private app: App;
@@ -23,7 +25,7 @@ export class Lobby {
     const s = el('div', 'screen');
     s.innerHTML = `<h1 class="logo">PIXEL<br>WAR</h1>
       <div class="subtitle">Conquer the real world, pixel by pixel.</div>
-      <div class="titlebox pix">
+      <div class="titlerow"><div class="titlebox pix">
         <label>COMMANDER NAME</label>
         <input id="nm" maxlength="20" value="${esc(a.name)}" autocomplete="off" spellcheck="false">
         <label>NATION COLOUR</label>
@@ -33,8 +35,11 @@ export class Lobby {
         <div class="row"><input id="code" class="codeinput grow" maxlength="5" placeholder="CODE" value="${esc(code)}" autocomplete="off"><button class="btn" data-a="join">Join room</button></div>
         <div class="muted" id="status" style="font-size:8px;text-align:center">${esc(msg || (a.net.status === 'open' ? '' : 'Connecting to server...'))}</div>
       </div>
+      ${desktop ? '<div class="titlebox hostbox pix"><label>HOST FROM THIS COMPUTER</label><div data-invite></div></div>' : ''}</div>
       <div class="foot">Map data © Natural Earth · Best in landscape on a tablet · <a href="#" data-a="help" style="color:inherit">How to play</a></div>`;
     this.root.append(s);
+    const inv = s.querySelector<HTMLElement>('[data-invite]');
+    if (inv) mountInvite(inv, null);
     const nm = s.querySelector<HTMLInputElement>('#nm')!;
     nm.addEventListener('change', () => { a.name = nm.value.trim().slice(0, 20) || 'Commander'; store.set('name', a.name); });
     s.addEventListener('click', (e) => {
@@ -83,14 +88,12 @@ export class Lobby {
     const used = new Set(info.players.filter((p: any) => p.id !== info.you).map((p: any) => p.color));
     const dis = host ? '' : 'disabled';
     const opt = (vals: [string | number, string][], cur: string | number) => vals.map(([v, l]) => `<option value="${v}" ${String(v) === String(cur) ? 'selected' : ''}>${l}</option>`).join('');
-    const link = `${location.origin}/?room=${info.code}`;
     this.root.innerHTML = '';
     const s = el('div', 'screen');
     s.innerHTML = `<div class="lobby-grid">
       <div class="pix">
-        <div class="row"><div class="grow"><div class="muted" style="font-size:8px">ROOM CODE</div><div class="roomcode">${info.code}</div></div>
-          <button class="btn" data-a="copy">Copy invite link</button></div>
-        <div class="muted" style="font-size:7px;word-break:break-all">${esc(link)}</div>
+        <div><div class="muted" style="font-size:8px">ROOM CODE</div><div class="roomcode">${info.code}</div></div>
+        <div data-invite></div>
         <h3 style="font-size:10px">PLAYERS ${info.players.length}/20</h3>
         <ul class="plist">${info.players.map((p: any) => `<li><span class="dot ${p.on ? 'on' : ''}"></span><span class="sw" style="background:${cssColor(p.color)}"></span><span class="grow">${esc(p.name)}${p.id === info.you ? ' <span class="tag you">YOU</span>' : ''}</span>${p.host ? iconImg('crown', '#ffd23f') : ''}${p.team ? `<span class="tag">TEAM ${p.team}</span>` : ''}</li>`).join('')}</ul>
         <div class="section">YOUR COLOUR</div>
@@ -120,6 +123,7 @@ export class Lobby {
       <div class="lobby-actions"><button class="btn red" data-a="leave">Leave</button>
         ${host ? `<button class="btn hi big" style="width:auto;padding:0 28px" data-a="start">${iconImg('troops')} Start match</button>` : '<div class="muted" style="align-self:center">Waiting for the host to start...</div>'}</div>`;
     this.root.append(s);
+    mountInvite(s.querySelector<HTMLElement>('[data-invite]')!, info.code);
     const send = (patch: Partial<MatchSettings>) => a.net.send({ t: 'settings', settings: { ...set, ...patch } });
     s.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-s]').forEach((inp) => {
       const k = inp.dataset.s!;
@@ -143,10 +147,6 @@ export class Lobby {
       sfx.click();
       if (b.dataset.a === 'start') a.net.send({ t: 'start' });
       else if (b.dataset.a === 'leave') a.net.send({ t: 'leave' });
-      else if (b.dataset.a === 'copy') {
-        const done = () => { b.textContent = 'Copied!'; setTimeout(() => (b.textContent = 'Copy invite link'), 1500); };
-        navigator.clipboard?.writeText(link).then(done, () => prompt('Invite link', link));
-      }
     });
   }
 }

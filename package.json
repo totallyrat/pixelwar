@@ -1,15 +1,22 @@
 {
   "name": "pixel-war",
+  "productName": "PIXEL WAR",
   "version": "1.0.0",
   "private": true,
   "description": "PIXEL WAR - multiplayer real-time pixel world domination",
+  "author": "PIXEL WAR",
   "type": "module",
+  "main": "dist/desktop/main.cjs",
   "scripts": {
     "start": "node tools/start.ts",
     "share": "node tools/share.ts",
     "dev": "node tools/dev.ts",
     "server": "node server/main.ts",
     "build": "vite build",
+    "app": "node tools/desktop.ts run",
+    "dist": "node tools/desktop.ts dist",
+    "dist:win": "node tools/desktop.ts dist --win",
+    "dist:mac": "node tools/desktop.ts dist --mac",
     "mapgen": "node tools/mapgen/mapgen.ts",
     "bench": "node tools/bench.ts",
     "typecheck": "tsc --noEmit -p ."
@@ -24,6 +31,10 @@
     "@fontsource/press-start-2p": "^5.1.0",
     "@types/node": "^24.0.0",
     "@types/ws": "^8.5.12",
+    "electron": "^44.5.1",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.2",
+    "qrcode-generator": "^2.0.4",
     "typescript": "^5.9.0",
     "vite": "^7.1.0"
   }

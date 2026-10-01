@@ -1,0 +1,58 @@
+# Builds the PIXEL WAR desktop installers on GitHub's machines: a Windows .exe and macOS .dmg files
+# (Apple Silicon and Intel). Start it from the Actions tab ("Run workflow") and download the installers from the
+# run's Artifacts, or push a tag like v1.0.1 to also publish them as a GitHub release.
+name: Desktop installers
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: --win
+          - os: macos-latest
+            target: --mac
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run dist -- ${{ matrix.target }}
+      - name: Smoke test the packaged app
+        run: node tools/desktop-smoke.ts --packaged
+      - name: Go online through Cloudflare (informational)
+        continue-on-error: true
+        run: node tools/desktop-smoke.ts --packaged --tunnel
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ runner.os }}
+          if-no-files-found: error
+          path: |
+            release/*.exe
+            release/*.dmg
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: installers
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: installers/*
